@@ -64,7 +64,7 @@ FEATURE_NAMES = [
 TEST_SIZE_RATIO = 0.4
 RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
-FBETA_BETA = 2
+FBETA_BETA = 3
 # Precisión mínima cambiada por el usuario
 PRECISION_MINIMA = 0.65 
 
@@ -435,38 +435,51 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
 
 def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_minima, random_state):
     """
-    Busca el umbral de decisión óptimo usando predicciones "Out-of-Fold" (OOF).
+    Busca el umbral de decisión óptimo usando predicciones "Out-of-Fold" (OOF)
+    Y ADEMÁS, grafica la relación entre el umbral, la precisión y el recall.
     """
     print(f"\nOptimizando umbral para: MAX(Recall) sujeto a Precision >= {precision_minima}...")
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
     print("Obteniendo predicciones de validación cruzada (OOF)...")
     y_probas_cv = cross_val_predict(
-        mejor_modelo, 
-        X_train, 
-        y_train, 
-        cv=skf, 
-        method='predict_proba', 
+        mejor_modelo,
+        X_train,
+        y_train,
+        cv=skf,
+        method='predict_proba',
         n_jobs=-1
-    )[:, 1] 
+    )[:, 1]
 
+    # Listas para almacenar los valores para la gráfica
     lista_umbrales = np.linspace(0.01, 0.99, 1000)
+    lista_precision = []
+    lista_recall = []
+
+    # Lógica para encontrar el mejor umbral (idéntica a la original)
     best_recall = -1
     optimal_threshold = 0.5 # Valor de fallback
     best_precision_at_best_recall = 0
 
+    print("Calculando métricas para cada umbral...")
     for thresh in lista_umbrales:
         y_pred_thresh = np.where(y_probas_cv >= thresh, 1, 0)
-        
+
         prec = precision_score(y_train, y_pred_thresh, zero_division=0)
         rec = recall_score(y_train, y_pred_thresh, zero_division=0)
 
+        # Almacenar valores para la gráfica
+        lista_precision.append(prec)
+        lista_recall.append(rec)
+
+        # Lógica de optimización
         if prec >= precision_minima:
             if rec > best_recall:
                 best_recall = rec
                 optimal_threshold = thresh
                 best_precision_at_best_recall = prec
             elif rec == best_recall:
+                # Si el recall es el mismo, preferimos el umbral más bajo (menos restrictivo)
                 optimal_threshold = min(optimal_threshold, thresh)
 
     if best_recall == -1:
@@ -478,7 +491,34 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
         print(f"   -> Umbral óptimo: {optimal_threshold:.4f}")
         print(f"   -> Recall resultante (en CV): {best_recall:.4f}")
         print(f"   -> Precision resultante (en CV): {best_precision_at_best_recall:.4f}")
-        
+
+    # --- INICIO DE LA NUEVA SECCIÓN DE GRÁFICO ---
+    print("Generando gráfico Precision-Recall vs. Umbral...")
+    plt.figure(figsize=(12, 7))
+    
+    # Graficar las curvas
+    plt.plot(lista_umbrales, lista_precision, label='Precision', color='blue', linewidth=2)
+    plt.plot(lista_umbrales, lista_recall, label='Recall', color='green', linewidth=2)
+    
+    # Línea vertical para el umbral óptimo encontrado
+    plt.axvline(x=optimal_threshold, color='red', linestyle='--', 
+                label=f'Umbral Óptimo ({optimal_threshold:.4f})')
+    
+    # Línea horizontal para la restricción de precisión
+    plt.axhline(y=precision_minima, color='gray', linestyle=':', 
+                label=f'Precisión Mínima ({precision_minima})')
+    
+    # Configuración del gráfico
+    plt.title('Precision y Recall vs. Umbral de Decisión (en datos de CV)', fontsize=16)
+    plt.xlabel('Umbral de Decisión (Threshold)', fontsize=12)
+    plt.ylabel('Puntuación (0.0 a 1.0)', fontsize=12)
+    plt.legend(loc='best')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.ylim(0, 1.05) # Dejar un pequeño margen superior
+    plt.xlim(0, 1.0)
+    plt.show()
+    # --- FIN DE LA NUEVA SECCIÓN DE GRÁFICO ---
+
     return optimal_threshold
 
 def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, optimal_threshold, feature_names):
@@ -610,7 +650,7 @@ def main():
         mejor_modelo, X_test, y_test, FEATURE_NAMES
     )
 
-    # PASO 5: Optimizar el umbral de decisión (con PRECISION_MINIMA = 0.6)
+    # PASO 5: Optimizar el umbral de decisión (con PRECISION_MINIMA)
     optimal_threshold = paso_5_optimizar_umbral(
         mejor_modelo, X_train, y_train, 
         N_SPLITS_CV, PRECISION_MINIMA, RANDOM_STATE_SEED

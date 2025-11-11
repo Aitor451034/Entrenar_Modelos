@@ -28,7 +28,7 @@ try:
     print(f"Total de puntos:    {total_puntos}")
     print("------------------------\n")
 
-    # 2. Preparar datos para el gráfico (conteo en las etiquetas)
+    # 2. Preparar datos para el gráfico 
     labels = [f'Con defecto ({num_defect})', f'Sin defecto ({num_no_defect})']
     sizes = [num_defect, num_no_defect]
     

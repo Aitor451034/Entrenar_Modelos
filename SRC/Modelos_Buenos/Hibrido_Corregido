@@ -514,6 +514,10 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
     plt.ylabel('Puntuación (0.0 a 1.0)', fontsize=12)
     plt.legend(loc='best')
     plt.grid(True, linestyle='--', alpha=0.6)
+    ticks = np.arange(0, 1, 0.05)
+    # Aplica esas marcas a ambos ejes
+    plt.xticks(ticks)
+    plt.yticks(ticks)
     plt.ylim(0, 1.05) # Dejar un pequeño margen superior
     plt.xlim(0, 1.0)
     plt.show()

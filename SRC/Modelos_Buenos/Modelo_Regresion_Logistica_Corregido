@@ -1,0 +1,738 @@
+"""
+Script para entrenar un modelo de Regresión Logística (LASSO L1)
+con el objetivo de detectar puntos de soldadura defectuosos.
+
+El proceso incluye:
+1.  Carga de datos de un CSV.
+2.  Extracción y cálculo de 32 características (feature engineering) 
+    a partir de las curvas de resistencia dinámica.
+3.  Escalado de datos (StandardScaler).
+4.  Entrenamiento del modelo usando LogisticRegressionCV para encontrar 
+    el hiperparámetro de regularización (lambda/C) óptimo,
+    optimizando para F2-Score.
+5.  Optimización del umbral de decisión para maximizar el Recall 
+    manteniendo una Precisión mínima (Regla de Sinergia).
+6.  Evaluación final del modelo en el conjunto de prueba (Test set).
+7.  Análisis de errores (Falsos Negativos y Falsos Positivos).
+8.  Guardado del modelo, el escalador y el umbral óptimo en un archivo .pkl.
+"""
+
+# ==============================================================================
+# 1. IMPORTACIONES DE BIBLIOTECAS
+# ==============================================================================
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pickle
+import tkinter as tk
+from tkinter import filedialog
+
+# --- Funciones científicas y estadísticas ---
+from scipy.signal import find_peaks
+from scipy.stats import skew, kurtosis
+
+# --- Componentes de Scikit-learn ---
+from sklearn.model_selection import StratifiedKFold, train_test_split, cross_val_predict
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import (
+    fbeta_score, make_scorer, classification_report, confusion_matrix,
+    precision_score, recall_score, roc_curve, roc_auc_score
+)
+
+# ==============================================================================
+# 2. FUNCIONES DE AYUDA (Feature Engineering y Carga de Datos)
+# ==============================================================================
+
+def leer_archivo():
+    """
+    Lee un archivo CSV que contiene datos de soldadura y lo devuelve como un DataFrame.
+    
+    Si la ruta por defecto no se encuentra, abre un diálogo para que el usuario
+    seleccione el archivo manualmente.
+
+    Returns:
+        pd.DataFrame: DataFrame con los contenidos del archivo CSV.
+    """
+    print("Abriendo archivo ...")
+    # Ruta harcodeada para conveniencia.
+    ruta_csv = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Inputs_modelo_pegado_con_datos4_mas.csv"
+    try:
+        df = pd.read_csv(ruta_csv, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",", skiprows=3)
+        print("¡Archivo CSV leído correctamente desde la ruta por defecto!")
+        return df
+    except FileNotFoundError:
+        print("No se ha encontrado el archivo en la ruta por defecto. Abriendo diálogo...")
+        # Fallback a un selector de archivos si no se encuentra
+        root = tk.Tk()
+        root.withdraw()  # Ocultar la ventana principal de tkinter
+        ruta_csv = filedialog.askopenfilename(title="Seleccionar archivo que contiene los datos",
+                                              filetypes=[("Archivos de CSV", "*.csv")])
+        if not ruta_csv:
+            print("Operación cancelada por el usuario.")
+            return None
+        df = pd.read_csv(ruta_csv, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",")
+        print("¡Archivo CSV leído correctamente desde la ruta seleccionada!")
+        return df
+    except Exception as e:
+        # Captura genérica para otros posibles errores de lectura
+        print(f"Se produjo un error inesperado al leer el archivo CSV: {e}")
+        return None
+
+def calcular_pendiente(resistencias, tiempos):
+    """
+    Calcula la pendiente (tasa de cambio) entre valores consecutivos 
+    de resistencia y tiempo.
+
+    Args:
+        resistencias (list): Secuencia de valores de resistencia.
+        tiempos (list): Secuencia de valores de tiempo correspondientes.
+
+    Returns:
+        list: Secuencia de valores de pendiente.
+    """
+    if len(resistencias) <= 1 or len(tiempos) <= 1:
+        return [0]
+    
+    pendientes = []
+    for i in range(len(resistencias) - 1):
+        delta_t = tiempos[i + 1] - tiempos[i]
+        delta_r = resistencias[i + 1] - resistencias[i]
+        
+        if delta_t == 0:
+            # Evitar división por cero si los tiempos son idénticos
+            pendiente_actual = 0
+        else:
+            pendiente_actual = (delta_r / delta_t) * 100
+        
+        # np.nan_to_num es una buena protección general
+        pendientes.append(round(np.nan_to_num(pendiente_actual, nan=0), 2))
+        
+    return pendientes
+
+def calcular_derivadas(resistencias, tiempos):
+    """
+    Calcula la primera, segunda y tercera derivada de la curva resistencia-tiempo.
+    Usa np.gradient para una estimación numérica.
+
+    Args:
+        resistencias (list): Secuencia de valores de resistencia.
+        tiempos (list): Secuencia de valores de tiempo correspondientes.
+
+    Returns:
+        tuple: (primera_derivada, segunda_derivada, tercera_derivada)
+               como arrays de numpy.
+    """
+    if len(resistencias) <= 1 or len(tiempos) <= 1:
+        # Retorna arrays con forma consistente si no hay datos suficientes
+        return np.array([0]), np.array([0]), np.array([0])
+    
+    # np.gradient es más robusto que la diferencia manual para derivadas
+    primera_derivada = np.gradient(resistencias, tiempos)  # Pendiente
+    segunda_derivada = np.gradient(primera_derivada, tiempos)  # Curvatura
+    tercera_derivada = np.gradient(segunda_derivada, tiempos)  # Jerk/Oscilación
+    
+    # Asegurarse de que no haya NaNs (aunque gradient suele manejarlos)
+    return (
+        np.nan_to_num(primera_derivada, nan=0),
+        np.nan_to_num(segunda_derivada, nan=0),
+        np.nan_to_num(tercera_derivada, nan=0)
+    )
+
+def calcular_parametros():
+    """
+    Función principal de carga y "Feature Engineering".
+    
+    Lee el archivo CSV usando `leer_archivo` y luego itera sobre cada
+    fila (cada punto de soldadura) para calcular un vector de 32 características.
+
+    Returns:
+        tuple: (X_calculado, y_calculado)
+            X_calculado (numpy.ndarray): Array 2D (n_samples, 32) con las features.
+            y_calculado (numpy.ndarray): Array 1D (n_samples,) con las etiquetas (0 o 1).
+    """
+    df = leer_archivo()
+    if df is None:
+        print("No se pudo cargar el archivo. Terminando ejecución.")
+        return np.array([]), np.array([])
+
+    # ==========================================================================
+    # PREPROCESAMIENTO INICIAL DEL DATAFRAME
+    # ==========================================================================
+    # Selección de columnas de interés
+    new_df = df.iloc[:, [0, 8, 9, 10, 20, 27, 67, 98]]
+    # Eliminar las últimas 2 filas (posiblemente metadatos o sumarios)
+    new_df = new_df.iloc[:-2]
+    # Renombrar columnas para fácil acceso
+    new_df.columns = ["id punto", "Ns", "Corrientes inst.", "Voltajes inst.", "KAI2", "Ts2", "Fuerza", "Etiqueta datos"]
+    
+    # Conversión de tipos numéricos
+    for col in ["KAI2", "Ts2", "Fuerza"]:
+        new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
+    
+    # Redondeo de floats
+    float_cols = new_df.select_dtypes(include='float64').columns
+    new_df = new_df.round({col: 4 for col in float_cols})
+    
+    # Reiniciar índice
+    new_df.index = range(1, len(new_df) + 1)
+
+    # Reemplazo de comas por puntos en todo el DataFrame original (si es necesario para otras columnas)
+    # Nota: Esta parte parece procesar 'df' pero no 'new_df'.
+    # Si las columnas de 'Corrientes inst.' y 'Voltajes inst.' ya están bien, 
+    # esta parte podría no ser necesaria.
+    for col in df.columns:
+        if df[col].dtype == object:
+            try:
+                df[col] = df[col].str.replace(',', '.', regex=False).astype(float)
+            except:
+                # Ignorar columnas que no se pueden convertir (ej. texto)
+                pass
+
+    # ==========================================================================
+    # BUCLE DE FEATURE ENGINEERING
+    # ==========================================================================
+    X_calculado = []
+    y_calculado = []
+
+    print(f"Iniciando cálculo de features para {len(new_df)} puntos de soldadura...")
+
+    # Iterar por cada fila (punto de soldadura)
+    for i in new_df.index:
+        # --- 1. Lectura y limpieza de datos de series temporales ---
+        datos_voltaje = new_df.loc[i, "Voltajes inst."]
+        if pd.isna(datos_voltaje):
+            print(f"Advertencia: Datos de voltaje nulos en fila {i}. Saltando fila.")
+            continue
+            
+        valores_voltaje = [float(v) for v in datos_voltaje.split(';') if v.strip()]
+        valores_voltaje = [round(v, 0) for v in valores_voltaje]
+
+        datos_corriente = new_df.loc[i, "Corrientes inst."]
+        if pd.isna(datos_corriente):
+            print(f"Advertencia: Datos de corriente nulos en fila {i}. Saltando fila.")
+            continue
+            
+        # Evitar división por cero en resistencia, reemplazar 0 con un valor pequeño
+        valores_corriente = [0.001 if float(v) == 0 else float(v) for v in datos_corriente.split(';') if v.strip()]
+        valores_corriente = [round(v, 0) for v in valores_corriente]
+
+        # Calcular Resistencia Dinámica (R = V/I)
+        valores_resistencia = [v / c if c != 0 else 0 for v, c in zip(valores_voltaje, valores_corriente)]
+        valores_resistencia = [round(r, 2) for r in valores_resistencia]
+        valores_resistencia.append(0)  # Añadir un 0 al final
+
+        # --- 2. Lectura de parámetros escalares ---
+        ns = int(new_df.loc[i, "Ns"])
+        ts2 = int(new_df.loc[i, "Ts2"])
+        kAI2 = new_df.loc[i, "KAI2"]  # Intensidad
+        f = new_df.loc[i, "Fuerza"]   # Fuerza
+
+        # Crear vector de tiempo
+        t_soldadura = (np.linspace(0, ts2, ns + 1)).tolist()
+
+        # Asegurar que las longitudes coincidan (parche por si ns no coincide)
+        if len(t_soldadura) != len(valores_resistencia):
+            print(f"Advertencia: Discrepancia de longitud en fila {i}. Ajustando.")
+            min_len = min(len(t_soldadura), len(valores_resistencia))
+            t_soldadura = t_soldadura[:min_len]
+            valores_resistencia = valores_resistencia[:min_len]
+            valores_voltaje = valores_voltaje[:min_len]
+
+        if not t_soldadura:
+            print(f"Advertencia: Fila {i} no tiene datos de series temporales. Saltando.")
+            continue
+            
+        # --- 3. Cálculo de características básicas de la curva R(t) ---
+        resistencia_max = max(valores_resistencia)
+        I_R_max = np.argmax(valores_resistencia)
+        t_R_max = int(t_soldadura[I_R_max])
+
+        r0 = valores_resistencia[0]
+        t0 = t_soldadura[0]
+        
+        # Resistencia última (antes del 0 añadido)
+        r_e = valores_resistencia[-2]
+        t_e = t_soldadura[-2]
+
+        resistencia_min = min(valores_resistencia[:-1])  # Excluir el 0 final
+        t_min_idx = np.argmin(valores_resistencia[:-1])
+        t_soldadura_min = t_soldadura[t_min_idx]
+
+        # --- 4. Cálculo de características de Energía y Área ---
+        # Calor total (Q = I^2 * R * t). Aquí R se infiere de V/I.
+        # Esta fórmula parece Q = (I^2 * t) / F. Revisar si es correcta.
+        q = np.nan_to_num(((((kAI2 * 1000.0) ** 2) * (ts2 / 1000.0)) / (f * 10.0)), nan=0)
+        
+        # Área bajo la curva R(t)
+        area_bajo_curva = np.nan_to_num(np.trapz(valores_resistencia, t_soldadura), nan=0)
+        
+        # Área antes del pico de resistencia
+        valores_resistencia_pre_max = valores_resistencia[:I_R_max + 1]
+        valores_tiempo_pre_max = t_soldadura[:I_R_max + 1]
+        area_pre_mitad = np.nan_to_num(np.trapz(valores_resistencia_pre_max, valores_tiempo_pre_max), nan=0)
+        
+        # Área después del pico de resistencia
+        valores_resistencia_post_max = valores_resistencia[I_R_max:]
+        valores_tiempo_post_max = t_soldadura[I_R_max:]
+        area_post_mitad = np.nan_to_num(np.trapz(valores_resistencia_post_max, valores_tiempo_post_max), nan=0)
+
+        # --- 5. Cálculo de características de Pendientes (k) ---
+        # Pendiente k3: desde inicio (r0) hasta pico (resistencia_max)
+        try:
+            delta_t_k3 = t_R_max - t0
+            k3 = 0 if delta_t_k3 == 0 else ((resistencia_max - r0) / delta_t_k3) * 100
+        except ZeroDivisionError:
+            k3 = 0
+        k3 = np.nan_to_num(k3, nan=0)
+
+        # Pendiente k4: desde pico (resistencia_max) hasta último punto (r_e)
+        try:
+            delta_t_k4 = t_e - t_R_max
+            k4 = 0 if delta_t_k4 == 0 else ((r_e - resistencia_max) / delta_t_k4) * 100
+        except ZeroDivisionError:
+            k4 = 0
+        k4 = np.nan_to_num(k4, nan=0)
+
+        # Pendiente de la curva de Voltaje (Pico a Fin)
+        voltaje_max = max(valores_voltaje)
+        t_max_v_idx = np.argmax(valores_voltaje)
+        t_voltaje_max = t_soldadura[t_max_v_idx]
+        voltaje_final = valores_voltaje[-2]
+        t_voltaje_final = t_soldadura[-2]
+        
+        try:
+            delta_t_v = t_voltaje_max - t_voltaje_final
+            pendiente_V = 0 if delta_t_v == 0 else (voltaje_max - voltaje_final) / delta_t_v
+        except ZeroDivisionError:
+            pendiente_V = 0
+        pendiente_V = np.nan_to_num(pendiente_V, nan=0)
+
+        # Número de pendientes negativas después del pico
+        pendientes = calcular_pendiente(valores_resistencia, t_soldadura)
+        pendientes_post_max = pendientes[I_R_max:] # Iniciar desde el pico
+        pendientes_negativas_post = sum(1 for p in pendientes_post_max if p < 0)
+
+        # Pendiente de regresión OLS (Mínimos Cuadrados)
+        # ADVERTENCIA: La fórmula del denominador parece incorrecta para OLS (usa Y en lugar de X).
+        # Se mantiene la fórmula original del script.
+        t_mean = np.nan_to_num(np.mean(t_soldadura), nan=0)
+        r_mean_ols = np.nan_to_num(np.mean(valores_resistencia), nan=0) # Usar media de R completa
+        numerador = sum((r_mean_ols - ri) * (t_mean - ti) for ri, ti in zip(valores_resistencia, t_soldadura))
+        denominador = sum((r_mean_ols - ri) ** 2 for ri in valores_resistencia)
+        m_min_cuadrados = 0 if denominador == 0 else (numerador / denominador)
+
+        # --- 6. Cálculo de características Estadísticas ---
+        resistencia_inicial = np.nan_to_num(r0, nan=2000) # nan=2000? Valor por defecto alto
+        resistencia_ultima_val = np.nan_to_num(r_e, nan=0)
+        
+        desv = np.nan_to_num(np.std(valores_resistencia), nan=0)
+        rms = np.nan_to_num(np.sqrt(np.mean(np.square(valores_resistencia))), nan=0)
+        r_mean = np.nan_to_num(np.mean(valores_resistencia[:-1]), nan=0) # Media sin el 0 final
+        r_mean_post_max = np.nan_to_num(np.mean(valores_resistencia[I_R_max:]), nan=0)
+        desv_R_pre_max = np.nan_to_num(np.std(valores_resistencia[:I_R_max]), nan=0) # Desv. antes del pico
+        
+        try:
+            desv_pre_mitad_t = np.nan_to_num(np.std(valores_resistencia_pre_max), nan=0)
+        except ValueError:
+            desv_pre_mitad_t = 0
+            
+        try:
+            mediana = np.nan_to_num(np.median(valores_resistencia), nan=0)
+            varianza = np.nan_to_num(np.var(valores_resistencia), nan=0)
+            rango_intercuartilico = np.nan_to_num(np.percentile(valores_resistencia, 75) - np.percentile(valores_resistencia, 25), nan=0)
+            asimetria = np.nan_to_num(skew(valores_resistencia), nan=0)
+            curtosis = np.nan_to_num(kurtosis(valores_resistencia), nan=0)
+        except ValueError: # Ocurre si la lista está vacía
+            mediana, varianza, rango_intercuartilico, asimetria, curtosis = 0, 0, 0, 0, 0
+
+        # --- 7. Cálculo de características de Rango (Diferencias) ---
+        rango_tiempo_max_min = np.nan_to_num(t_R_max - t_soldadura_min, nan=0)
+        rango_rmax_rmin = np.nan_to_num(resistencia_max - resistencia_min, nan=0)
+        rango_r_beta_alfa = np.nan_to_num(resistencia_max - r0, nan=0) # R.max - R.inicial
+        rango_r_e_beta = np.nan_to_num(r_e - resistencia_max, nan=0) # R.final - R.max
+        rango_t_e_beta = np.nan_to_num(t_e - t_R_max, nan=0) # t.final - t.max
+
+        # --- 8. Cálculo de características de Derivadas y Picos ---
+        primera_derivada, segunda_derivada, tercera_derivada = calcular_derivadas(valores_resistencia, t_soldadura)
+        
+        try:
+            max_curvatura = np.nan_to_num(np.max(np.abs(segunda_derivada)), nan=0)
+            max_jerk = np.nan_to_num(np.max(np.abs(tercera_derivada)), nan=0)
+            # Puntos de inflexión (donde la 2a derivada cruza cero)
+            puntos_inflexion = np.where(np.diff(np.sign(segunda_derivada)))[0]
+            num_puntos_inflexion = np.nan_to_num(len(puntos_inflexion), nan=0)
+        except ValueError:
+            max_curvatura, max_jerk, num_puntos_inflexion = 0, 0, 0
+
+        # Picos y Valles
+        valores_resistencia_np = np.array(valores_resistencia)
+        picos, _ = find_peaks(valores_resistencia_np, height=0)
+        valles, _ = find_peaks(-valores_resistencia_np)
+        num_picos = np.nan_to_num(len(picos), nan=0)
+        num_valles = np.nan_to_num(len(valles), nan=0)
+
+        # --- 9. Agregar features y etiqueta ---
+        X_calculado.append([
+            float(rango_r_beta_alfa),         # Feature 0: rango_r_beta_alfa
+            float(rango_t_e_beta),            # Feature 1: rango_t_e_beta
+            float(rango_r_e_beta),            # Feature 2: rango_r_e_beta
+            float(resistencia_inicial),       # Feature 3: resistencia_inicial
+            float(k4),                        # Feature 4: k4
+            float(k3),                        # Feature 5: k3
+            float(rango_intercuartilico),     # Feature 6: rango_intercuartilico
+            float(desv_pre_mitad_t),          # Feature 7: desv_pre_mitad_t
+            float(resistencia_ultima_val),    # Feature 8: resistencia_ultima
+            float(desv),                      # Feature 9: desv (std total)
+            float(pendiente_V),               # Feature 10: pendiente_V
+            float(rms),                       # Feature 11: rms
+            float(rango_rmax_rmin),           # Feature 12: rango_rmax_rmin
+            float(r_mean_post_max),           # Feature 13: r_mean_post_max
+            float(r_mean),                    # Feature 14: r_mean
+            float(desv_R_pre_max),            # Feature 15: desv_R (pre-max)
+
+            float(pendientes_negativas_post), # Feature 16: pendientes_negativas_post
+            float(rango_tiempo_max_min),      # Feature 17: rango_tiempo_max_min
+            float(area_bajo_curva),           # Feature 18: area_bajo_curva
+            float(area_pre_mitad),            # Feature 19: area_pre_mitad
+            float(area_post_mitad),           # Feature 20: area_post_mitad
+            float(max_curvatura),             # Feature 21: max_curvatura
+            float(num_puntos_inflexion),      # Feature 22: num_puntos_inflexion
+            float(max_jerk),                  # Feature 23: max_jerk
+            float(mediana),                   # Feature 24: mediana
+            float(varianza),                  # Feature 25: varianza
+            float(asimetria),                 # Feature 26: asimetria
+            float(curtosis),                  # Feature 27: curtosis
+            float(num_picos),                 # Feature 28: num_picos
+            float(num_valles),                # Feature 29: num_valles
+            float(q),                         # Feature 30: q (Energía/Fuerza)
+            float(m_min_cuadrados)            # Feature 31: m_min_cuadrados (Slope OLS)
+        ])
+        
+        # Agregar la etiqueta
+        valor_etiqueta = int(new_df.loc[i, "Etiqueta datos"])
+        y_calculado.append(valor_etiqueta)
+
+    print("Cálculo de features completado.")
+    
+    # Convertir listas a arrays de numpy para sklearn
+    X_calculado = np.array(X_calculado)
+    y_calculado = np.array(y_calculado)
+    
+    return X_calculado, y_calculado
+
+# ==============================================================================
+# 3. EJECUCIÓN PRINCIPAL DEL SCRIPT
+# ==============================================================================
+if __name__ == "__main__":
+    
+    # --- Nombres de las 32 características (para legibilidad) ---
+    FEATURE_NAMES = [
+        "rango_r_beta_alfa", "rango_t_e_beta", "rango_r_e_beta", "resistencia_inicial",
+        "k4", "k3", "rango_intercuartilico", "desv_pre_mitad_t",
+        "resistencia_ultima", "desv", "pendiente_V", "rms",
+        "rango_rmax_rmin", "r_mean_post_max", "r_mean", "desv_R_pre_max",
+        "pendientes_negativas_post", "rango_tiempo_max_min", "area_bajo_curva", "area_pre_mitad",
+        "area_post_mitad", "max_curvatura", "num_puntos_inflexion", "max_jerk",
+        "mediana", "varianza", "asimetria", "curtosis",
+        "num_picos", "num_valles", "q", "m_min_cuadrados"
+    ]
+
+    # ==========================================================================
+    # PASO 1: Cargar datos y calcular features
+    # ==========================================================================
+    X_raw, y_raw = calcular_parametros()
+
+    if X_raw.size == 0:
+        print("No se cargaron datos. Saliendo del script.")
+    else:
+        # Convertir a DataFrames de Pandas para mejor manejo
+        # Usamos los NOMBRES DE FEATURES para que las columnas sean legibles
+        X = pd.DataFrame(X_raw, columns=FEATURE_NAMES)
+        X = X.applymap(lambda x: round(x, 4))
+        y = pd.Series(y_raw, name="Etiqueta_Defecto")
+
+        print("\n--- Resumen de Datos Cargados ---")
+        print(f"Total de muestras: {len(X)}")
+        print(f"Número de características: {X.shape[1]}")
+        print(f"Distribución de clases:\n{y.value_counts(normalize=True)}")
+        print("----------------------------------\n")
+
+        # ==========================================================================
+        # PASO 2: Separar en Entrenamiento (Train) y Prueba (Test)
+        # ==========================================================================
+        # Usamos 40% para test, estratificado para mantener la proporción de defectos
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, 
+            test_size=0.4, 
+            random_state=42, 
+            stratify=y
+        )
+
+        # ==========================================================================
+        # PASO 3: Escalar los datos
+        # ==========================================================================
+        # La Regresión Logística con L1 (Lasso) es MUY sensible a la escala.
+        # Es fundamental escalar los datos para que el modelo converja
+        # correctamente y la regularización L1 funcione bien.
+        print("Escalando datos...")
+        scaler = StandardScaler()
+
+        # Ajustamos el escalador SÓLO con datos de entrenamiento
+        X_train_scaled = scaler.fit_transform(X_train)
+        # Transformamos los datos de prueba con el escalador YA AJUSTADO
+        X_test_scaled = scaler.transform(X_test)
+
+        # Convertir de nuevo a DataFrame (con nombres de columnas)
+        X_train = pd.DataFrame(X_train_scaled, columns=X_train.columns)
+        X_test = pd.DataFrame(X_test_scaled, columns=X_test.columns)
+        print("Datos escalados.")
+
+        # ==========================================================================
+        # PASO 4: Entrenamiento y Búsqueda de Hiperparámetros con LogisticRegressionCV
+        # ==========================================================================
+        print("Iniciando búsqueda eficiente de lambda (C) con LogisticRegressionCV...")
+        
+        # Validación cruzada estratificada (mantiene proporción de clases en cada fold)
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        # Definir el scorer: F2-Score (da más importancia a Recall que a Precision)
+        fbeta = 2
+        f2_scorer = make_scorer(fbeta_score, beta=fbeta)
+
+        # Lista de 'C' (inversa de lambda) a probar.
+        # 1000 valores en escala logarítmica entre 0.0001 y 10.
+        lista_lambdas_log = np.logspace(-4, 1, 1000)
+
+        # Usamos LogisticRegressionCV: está optimizada para esta tarea y es más rápida
+        # que GridSearchCV + LogisticRegression.
+        mejor_modelo = LogisticRegressionCV(
+            Cs=lista_lambdas_log,       # Lista de 'C' a probar
+            cv=skf,                     # Estrategia de validación cruzada
+            scoring=f2_scorer,          # Métrica a optimizar (F2-Score)
+            penalty="l1",               # Regularización L1 (Lasso) para selección de features
+            solver="liblinear",         # Solver eficiente para L1
+            tol=1e-5,
+            max_iter=3000,
+            random_state=42,
+            class_weight="balanced",    # ¡CLAVE! Da más peso a la clase minoritaria (defectos)
+            n_jobs=-1                   # Usar todos los núcleos de CPU
+        )
+
+        # Entrenar el modelo (hace la búsqueda y re-entrena con el mejor C)
+        mejor_modelo.fit(X_train, y_train)
+        print("Entrenamiento y búsqueda de C completados.")
+
+        # --- Resultados del entrenamiento ---
+        mejor_lambda_C = mejor_modelo.C_[0]
+        print(f"Mejor C (1/lambda): {mejor_lambda_C}")
+
+        # Scores promedio por C
+        mean_scores = np.mean(list(mejor_modelo.scores_.values())[0], axis=0)
+        mejor_score_f2 = np.max(mean_scores)
+        print(f"Mejor score F2 (en CV): {mejor_score_f2}")
+
+        # ==========================================================================
+        # PASO 5: Análisis de Coeficientes del Modelo
+        # ==========================================================================
+        # La regularización L1 pone a 0 los coeficientes de features no importantes.
+        df_coeficientes = pd.DataFrame({
+            'predictor': X_train.columns,
+            'coef': mejor_modelo.coef_.flatten()
+        })
+        
+        # Filtrar coeficientes que no son cero
+        df_coeficientes_no_cero = df_coeficientes[np.abs(df_coeficientes.coef) > 0]
+        n_predictores = len(df_coeficientes_no_cero)
+        print(f"\nEl modelo seleccionó {n_predictores} de {X_train.shape[1]} características.")
+        print(df_coeficientes_no_cero.sort_values(by='coef', ascending=False))
+
+        # --- Gráfico de Coeficientes ---
+        fig, ax = plt.subplots(figsize=(14, 6))
+        ax.stem(df_coeficientes.predictor, df_coeficientes.coef, markerfmt=' ')
+        plt.xticks(rotation=90, ha='right', size=8)
+        ax.set_xlabel('Característica (Feature)')
+        ax.set_ylabel('Valor del Coeficiente')
+        ax.set_title(f'Coeficientes del Modelo LASSO (L1) - {n_predictores} features seleccionadas')
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.show()
+        
+        # ==============================================================================
+        # Calcular la matriz de confusión sin optimizar umbral
+        # Realizar las predicciones en el conjunto de prueba
+        predicciones1 = mejor_modelo.predict(X_test)
+        matriz_confusion = confusion_matrix(y_test, predicciones1)
+        nombres_etiquetas = ["Punto SIN DEFECTO","Punto CON PEGADO"]
+        fig, ax = plt.subplots()    
+        tick_marks = np.arange(len(nombres_etiquetas))
+        plt.xticks(tick_marks, nombres_etiquetas)
+        plt.yticks(tick_marks, nombres_etiquetas)
+        sns.heatmap(
+        pd.DataFrame(matriz_confusion),
+        annot=True,
+        cmap="YlGnBu",
+        fmt='g',
+        cbar = False,
+        xticklabels = ["Predicho Sin defecto", "Predicho Pegado"], yticklabels = ["Real Sin defecto", "Real Pegado"])
+        ax.xaxis.set_label_position("bottom")
+        plt.tight_layout()
+        plt.title("Confusion matrix MODELO LASSO USANDO REGRESION LOGISTICA sin optimizar el umbral de predicciones (umbral = 0.5)")
+        plt.ylabel('Etiqueta real')
+        plt.xlabel('Predicción')
+        plt.show()
+        # ==============================================================================
+
+        # ==========================================================================
+        # PASO 6: Optimización del Umbral de Decisión (Regla de Sinergia)
+        # ==========================================================================
+        # Objetivo: Maximizar Recall (sensibilidad) asegurando una Precisión mínima.
+        #           (Encontrar todos los defectos posibles, sin generar demasiadas falsas alarmas)
+        PRECISION_MINIMA = 0.6 
+        print(f"\nOptimizando umbral para: MAX(Recall) sujeto a Precision >= {PRECISION_MINIMA}...")
+
+        # 1. Obtener probabilidades "fuera de fold" (OOF) del set de entrenamiento.
+        # Esto evita el sobreajuste al optimizar el umbral.
+        print("Obteniendo predicciones de validación cruzada (OOF)...")
+        y_probas_cv = cross_val_predict(
+            mejor_modelo, 
+            X_train, 
+            y_train, 
+            cv=skf, 
+            method='predict_proba', 
+            n_jobs=-1
+        )[:, 1] # Probabilidad de la clase "1" (defecto)
+
+        # 2. Iterar sobre posibles umbrales para encontrar el óptimo
+        lista_umbrales = np.linspace(0.01, 0.99, 1000)
+        best_recall = -1
+        optimal_threshold = 0.01
+        best_precision_at_best_recall = 0
+
+        for thresh in lista_umbrales:
+            y_pred_thresh = np.where(y_probas_cv >= thresh, 1, 0)
+            
+            prec = precision_score(y_train, y_pred_thresh, zero_division=0)
+            rec = recall_score(y_train, y_pred_thresh, zero_division=0)
+
+            # 1. ¿Cumple la precisión mínima?
+            if prec >= PRECISION_MINIMA:
+                # 2. Si la cumple, ¿es el mejor RECALL visto?
+                if rec > best_recall:
+                    best_recall = rec
+                    optimal_threshold = thresh
+                    best_precision_at_best_recall = prec
+                # 3. Si empata en Recall, preferimos el umbral más bajo (más sensible)
+                elif rec == best_recall:
+                    optimal_threshold = min(optimal_threshold, thresh)
+
+        # --- Resultado de la optimización ---
+        if best_recall == -1:
+            print(f"¡ADVERTENCIA! No se encontró NINGÚN umbral que cumpla 'Precision >= {PRECISION_MINIMA}'.")
+            print("El modelo no puede satisfacer este requisito. Usando 0.5 por defecto.")
+            optimal_threshold = 0.5
+        else:
+            print("¡Éxito! Se encontró un umbral óptimo.")
+            print(f"   -> Umbral óptimo: {optimal_threshold:.4f}")
+            print(f"   -> Recall resultante (en CV): {best_recall:.4f}")
+            print(f"   -> Precision resultante (en CV): {best_precision_at_best_recall:.4f}")
+
+        # ==========================================================================
+        # PASO 7: Evaluación Final en el Conjunto de Prueba (Test Set)
+        # ==========================================================================
+        print("\nAplicando modelo y umbral óptimo al conjunto de prueba (Test Set)...")
+        
+        # Obtener probabilidades del Test Set
+        predicciones_test_proba = mejor_modelo.predict_proba(X_test)[:, 1]
+        
+        # Aplicar el umbral óptimo para obtener predicciones binarias
+        predicciones_test_binarias = np.where(predicciones_test_proba >= optimal_threshold, 1, 0)
+
+        # --- Reporte de Clasificación ---
+        print("\n--- Reporte de Clasificación (Test Set) ---")
+        target_names = ['0: Sin Defecto', '1: Con Defecto (Pegado)']
+        print(classification_report(y_test, predicciones_test_binarias, target_names=target_names))
+
+        # --- Matriz de Confusión (Test Set) ---
+        matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
+        fig, ax = plt.subplots()
+        sns.heatmap(
+            pd.DataFrame(matriz_confusion_opt),
+            annot=True,
+            cmap="YlGnBu",
+            fmt='g',
+            cbar=False,
+            xticklabels=["Predicho Sin Defecto", "Predicho Pegado"],
+            yticklabels=["Real Sin Defecto", "Real Pegado"]
+        )
+        ax.xaxis.set_label_position("bottom")
+        plt.tight_layout()
+        plt.title(f"Matriz de Confusión (Test Set)\nUmbral Optimizado = {optimal_threshold:.4f}")
+        plt.ylabel('Etiqueta Real')
+        plt.xlabel('Predicción')
+        plt.show()
+
+        # --- Curva ROC (Test Set) ---
+        # ¡CORREGIDO! Usar probabilidades (proba) no predicciones binarias (binarias)
+        fpr, tpr, _ = roc_curve(y_test, predicciones_test_proba)
+        auc_score = roc_auc_score(y_test, predicciones_test_proba)
+        
+        plt.figure()
+        plt.plot(fpr, tpr, label=f"Modelo LASSO (AUC = {auc_score:.4f})")
+        plt.plot([0, 1], [0, 1], 'k--', label="Azar (AUC = 0.5)")
+        plt.xlabel('Tasa de Falsos Positivos (FPR)')
+        plt.ylabel('Tasa de Verdaderos Positivos (TPR)')
+        plt.title('Curva ROC (Test Set)')
+        plt.legend(loc='lower right')
+        plt.grid()
+        plt.show()
+
+        # ==========================================================================
+        # PASO 8: Análisis de Errores (FN y FP)
+        # ==========================================================================
+        print("\n--- INICIANDO ANÁLISIS DE ERRORES EN EL TEST SET ---")
+
+        # 1. Crear el DataFrame de análisis BASADO en y_test.
+        # y_test SÍ conserva el índice original del DataFrame (ej. 145, 182, etc.)
+        df_analisis = pd.DataFrame(y_test)
+
+        # 2. Añadir las probabilidades y predicciones.
+        # Como son arrays de numpy, se asignarán en orden a las filas existentes.
+        df_analisis['Probabilidad_Defecto'] = predicciones_test_proba
+        df_analisis['Prediccion_Binaria'] = predicciones_test_binarias
+        
+        #--- FALSOS NEGATIVOS (FN) ---
+        # (Usamos 'Etiqueta_Defecto' como se llama en 'y_test')
+        condicion_FN = (df_analisis['Etiqueta_Defecto'] == 1) & (df_analisis['Prediccion_Binaria'] == 0)
+        falsos_negativos = df_analisis[condicion_FN]
+ 
+        print(f"\n[INFORME] Se han encontrado {len(falsos_negativos)} Falsos Negativos (Defectos NO detectados):")
+        # Imprimir solo las columnas relevantes
+        print(falsos_negativos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
+
+        # --- FALSOS POSITIVOS (FP) ---
+        condicion_FP = (df_analisis['Etiqueta_Defecto'] == 0) & (df_analisis['Prediccion_Binaria'] == 1)
+        falsos_positivos = df_analisis[condicion_FP]
+ 
+        print(f"\n[INFORME] Se han encontrado {len(falsos_positivos)} Falsos Positivos (Falsas Alarmas):")
+        print(falsos_positivos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
+
+        # ==========================================================================
+        # PASO 9: Guardar los Artefactos del Modelo
+        # ==========================================================================
+        # Es VITAL guardar el 'scaler' junto con el modelo,
+        # para poder escalar los datos nuevos exactamente de la misma manera.
+        print("\nGuardando modelo, scaler y umbral en 'modelo_con_umbral_PEGADOS_LOR.pkl'...")
+        
+        artefactos_modelo = {
+            "modelo": mejor_modelo,
+            "scaler": scaler,              # ¡MUY IMPORTANTE!
+            "umbral": optimal_threshold,
+            "feature_names": FEATURE_NAMES # Lista de nombres de features
+        }
+        
+        with open('modelo_con_umbral_PEGADOS.pkl', 'wb') as f:
+            pickle.dump(artefactos_modelo, f)
+
+        print(f"¡Proceso completado! Modelo guardado con umbral = {optimal_threshold:.4f}")

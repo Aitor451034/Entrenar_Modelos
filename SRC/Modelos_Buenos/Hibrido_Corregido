@@ -48,7 +48,7 @@ from imblearn.over_sampling import SMOTE
 # 2. CONSTANTES Y CONFIGURACIÓN
 # ==============================================================================
 
-RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Inputs_modelo_pegado_con_datos4_mas.csv"
+RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Datos_Titanio25-26.csv"
 
 FEATURE_NAMES = [
     "rango_r_beta_alfa", "rango_t_e_beta", "rango_r_e_beta", "resistencia_inicial",
@@ -64,9 +64,9 @@ FEATURE_NAMES = [
 TEST_SIZE_RATIO = 0.4
 RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
-FBETA_BETA = 3
+FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.65 
+PRECISION_MINIMA = 0.67 
 
 
 # ==============================================================================

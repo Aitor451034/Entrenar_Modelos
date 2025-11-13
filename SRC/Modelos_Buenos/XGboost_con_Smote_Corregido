@@ -49,7 +49,7 @@ from xgboost import XGBClassifier
 # 2. CONSTANTES Y CONFIGURACIÓN
 # ==============================================================================
 
-RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Inputs_modelo_pegado_con_datos3.csv"
+RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Datos_Titanio25-26.csv"
 
 FEATURE_NAMES = [
     "rango_r_beta_alfa", "rango_t_e_beta", "rango_r_e_beta", "resistencia_inicial",
@@ -355,24 +355,27 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, ratio_desbalanceo, random_state):
     """
-    *** LÓGICA CENTRAL: SMOTE + XGBoost ***
-    Configura y ejecuta GridSearchCV en un pipeline de SMOTE y XGBClassifier.
-    
-    Nota: El uso de 'scale_pos_weight' Y 'SMOTE' al mismo tiempo es
-    redundante y puede sobre-corregir. Sin embargo, se mantiene
-    para respetar la lógica del script original.
+    Entrena un pipeline SMOTE + XGBoost optimizado para datasets pequeños.
+    Se prioriza evitar overfitting y mantener un buen recall.
     """
-    print("Iniciando búsqueda de hiperparámetros para SMOTE + XGBoost...")
+    print("Iniciando entrenamiento optimizado SMOTE + XGBoost...")
     
+    # 1. Stratified KFold
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
-    # 1. Definir el modelo XGBoost
-    # 
+    # 2. Modelo XGBoost optimizado
     modelo_xgb = XGBClassifier(
         random_state=random_state,
         eval_metric='logloss',
-        scale_pos_weight=ratio_desbalanceo  # <-- Hiperparámetro para desbalanceo
+        max_depth=3,           # Profundidad reducida
+        learning_rate=0.05,    # Aprendizaje más lento
+        n_estimators=200,      # Número moderado de árboles
+        subsample=0.7,         # Subsample para regularización
+        colsample_bytree=0.7,  # Column subsample
+        reg_alpha=0.1,         # Regularización L1
+        reg_lambda=1,          # Regularización L2
+        use_label_encoder=False
     )
 
     # 2. Definir el Pipeline de Imbalanced-learn
@@ -385,8 +388,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, ratio_desbalanceo,
     # 3. Definir el GRID de parámetros para el pipeline
     # (Los nombres deben incluir el prefijo del paso: 'model__...')
     param_grid_xgb = {
-        'model__n_estimators': [100, 200, 300],
-        'model__max_depth': [3, 4, 5],
+        'model__n_estimators': [100, 200, 300, 400, 500],
+        'model__max_depth': [3, 4],
         'model__learning_rate': [0.01, 0.05, 0.1],
         'model__subsample': [0.7, 1.0],
         'model__colsample_bytree': [0.7, 1.0]
@@ -467,24 +470,35 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
         n_jobs=-1
     )[:, 1] # Probabilidad de la clase "1" (defecto)
 
-    # 2. Iterar sobre posibles umbrales
+    # Listas para almacenar los valores para la gráfica
     lista_umbrales = np.linspace(0.01, 0.99, 1000)
+    lista_precision = []
+    lista_recall = []
+    
+    # Lógica para encontrar el mejor umbral (idéntica a la original)
     best_recall = -1
     optimal_threshold = 0.5 # Valor de fallback
     best_precision_at_best_recall = 0
 
+    print("Calculando métricas para cada umbral...")
     for thresh in lista_umbrales:
         y_pred_thresh = np.where(y_probas_cv >= thresh, 1, 0)
         
         prec = precision_score(y_train, y_pred_thresh, zero_division=0)
         rec = recall_score(y_train, y_pred_thresh, zero_division=0)
 
+        # Almacenar valores para la gráfica
+        lista_precision.append(prec)
+        lista_recall.append(rec)
+        
+        # Lógica de optimización
         if prec >= precision_minima:
             if rec > best_recall:
                 best_recall = rec
                 optimal_threshold = thresh
                 best_precision_at_best_recall = prec
-            elif rec == best_recall: # Si empata en Recall, preferir umbral más bajo
+            elif rec == best_recall: 
+                # Si empata en Recall, preferir umbral mas bajo
                 optimal_threshold = min(optimal_threshold, thresh)
 
     # --- Comprobación y Fallback ---
@@ -497,7 +511,38 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
         print(f"   -> Umbral óptimo: {optimal_threshold:.4f}")
         print(f"   -> Recall resultante (en CV): {best_recall:.4f}")
         print(f"   -> Precision resultante (en CV): {best_precision_at_best_recall:.4f}")
-        
+    
+    # --- INICIO DE LA NUEVA SECCIÓN DE GRÁFICO ---
+    print("Generando gráfico Precision-Recall vs. Umbral...")
+    plt.figure(figsize=(12, 7))
+    
+    # Graficar las curvas
+    plt.plot(lista_umbrales, lista_precision, label='Precision', color='blue', linewidth=2)
+    plt.plot(lista_umbrales, lista_recall, label='Recall', color='green', linewidth=2)
+    
+    # Línea vertical para el umbral óptimo encontrado
+    plt.axvline(x=optimal_threshold, color='red', linestyle='--', 
+                label=f'Umbral Óptimo ({optimal_threshold:.4f})')
+    
+    # Línea horizontal para la restricción de precisión
+    plt.axhline(y=precision_minima, color='gray', linestyle=':', 
+                label=f'Precisión Mínima ({precision_minima})')
+    
+    # Configuración del gráfico
+    plt.title('Precision y Recall vs. Umbral de Decisión (en datos de CV)', fontsize=16)
+    plt.xlabel('Umbral de Decisión (Threshold)', fontsize=12)
+    plt.ylabel('Puntuación (0.0 a 1.0)', fontsize=12)
+    plt.legend(loc='best')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    ticks = np.arange(0, 1, 0.05)
+    # Aplica esas marcas a ambos ejes
+    plt.xticks(ticks)
+    plt.yticks(ticks)
+    plt.ylim(0, 1.05) # Dejar un pequeño margen superior
+    plt.xlim(0, 1.0)
+    plt.show()
+    # --- FIN DE LA NUEVA SECCIÓN DE GRÁFICO ---
+    
     return optimal_threshold
 
 def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, optimal_threshold, feature_names):

@@ -66,7 +66,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.7
+PRECISION_MINIMA = 0.68
 
 
 # ==============================================================================

@@ -1,18 +1,17 @@
 """
-Script para entrenar un modelo XGBoost con sobremuestreo SMOTE
+Script para entrenar un modelo Híbrido (SMOTE + Random Forest)
 con el objetivo de detectar puntos de soldadura defectuosos (pegados).
 
 El proceso incluye:
-1.  Carga de datos de un CSV.
-2.  Extracción y cálculo de 32 características (feature engineering).
-3.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
-4.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
+1.  Carga de datos y extracción de 32 características (feature engineering).
+2.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
+3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
     a. Aplica SMOTE para sobremuestrear la clase minoritaria.
-    b. Entrena un modelo XGBClassifier.
-5.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
-6.  Optimización del umbral de decisión (Regla de Sinergia).
-7.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
-8.  Guardado del pipeline completo (SMOTE + Scaler + XGBoost) y el umbral.
+    b. Entrena un modelo RandomForestClassifier.
+4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
+5.  Optimización del umbral de decisión (Regla de Sinergia).
+6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
+7.  Guardado del pipeline completo (SMOTE + Scaler + RF) y el umbral.
 """
 
 # ==============================================================================
@@ -33,16 +32,16 @@ from scipy.stats import skew, kurtosis
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
 from sklearn.preprocessing import StandardScaler
+from catboost import CatBoostClassifier
 from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
 from sklearn import metrics
 
-# --- NUEVAS BIBLIOTECAS: Imbalanced-learn y XGBoost ---
+# --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
-from xgboost import XGBClassifier
 
 
 # ==============================================================================
@@ -66,15 +65,14 @@ TEST_SIZE_RATIO = 0.4
 RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
-PRECISION_MINIMA = 0.70
+# Precisión mínima cambiada por el usuario
+PRECISION_MINIMA = 0.77
 
 
 # ==============================================================================
 # 3. FUNCIONES DE CARGA Y EXTRACCIÓN DE CARACTERÍSTICAS
 # ==============================================================================
-# (Estas funciones son idénticas a las versiones anteriores, ya que son
-#  agnósticas al modelo. Se colapsan aquí por brevedad, pero están
-#  completas en el script final.)
+# (Funciones idénticas a las versiones anteriores, colapsadas por brevedad)
 
 def leer_archivo(ruta_csv_defecto):
     """Lee un archivo CSV con datos de soldadura."""
@@ -317,17 +315,13 @@ def paso_1_cargar_y_preparar_datos(ruta_csv_defecto, feature_names):
 
     print("\n--- Resumen de Datos Cargados ---")
     print(f"Total de muestras: {len(X)}")
-    print(f"Número de características: {X.shape[1]}")
     print(f"Distribución de clases (antes de SMOTE):\n{y.value_counts(normalize=True)}")
     print("----------------------------------\n")
     return X, y
 
 def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     """
-    Divide los datos en train/test, escala X, y calcula el ratio de desbalanceo.
-    
-    Returns:
-        tuple: (X_train, X_test, y_train, y_test, scaler, ratio_desbalanceo)
+    Divide los datos en train/test y los escala usando StandardScaler.
     """
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, 
@@ -346,74 +340,129 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     X_train = pd.DataFrame(X_train_scaled, columns=train_cols)
     X_test = pd.DataFrame(X_test_scaled, columns=train_cols)
     
-    # Calcular ratio de desbalanceo para XGBoost
-    conteo_clases = y_train.value_counts()
-    ratio_desbalanceo = conteo_clases[0] / conteo_clases[1]
-    print(f"Datos divididos y escalados. Ratio de desbalanceo (0s/1s): {ratio_desbalanceo:.2f}")
+    print("\n--- Iniciando Selección de Características ---")
     
-    return X_train, X_test, y_train, y_test, scaler, ratio_desbalanceo
+    # 1. Entrenar un modelo "filtro" rápido SOLO en X_train
+    # (Usamos RandomForest, es rápido y bueno para esto)
+    from sklearn.ensemble import RandomForestClassifier
+    
+    # Usamos los datos escalados de X_train para el filtro
+    filtro_rf = RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1)
+    filtro_rf.fit(X_train, y_train) 
 
-def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, ratio_desbalanceo, random_state):
-    """
-    Entrena un pipeline SMOTE + XGBoost optimizado para datasets pequeños.
-    Se prioriza evitar overfitting y mantener un buen recall.
-    """
-    print("Iniciando entrenamiento optimizado SMOTE + XGBoost...")
+    # 2. Obtener las importancias
+    importancias = filtro_rf.feature_importances_
+    df_importancias = pd.DataFrame({
+        'feature': X_train.columns, 
+        'importancia': importancias
+    }).sort_values(by='importancia', ascending=False)
     
-    # 1. Stratified KFold
+    print("Importancia de características (modelo filtro):")
+    print(df_importancias.to_string())
+    
+    # ==========================================================================
+    # --- INICIO: CÓDIGO DE GRÁFICA AÑADIDO ---
+    # ==========================================================================
+    
+    print("Generando gráfica de importancia de características del filtro...")
+    
+    # Creamos una copia ordenada para la gráfica (ascendente para barh)
+    df_plot = df_importancias.sort_values(by='importancia', ascending=True)
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.barh(df_plot.feature, df_plot.importancia) # Usamos las columnas del df
+    plt.yticks(size=8)
+    ax.set_xlabel('Importancia de la Característica')
+    ax.set_ylabel('Variable Predictora')
+    ax.set_title('Importancia de Características (Modelo Filtro - RandomForest)') # Título adaptado
+    plt.tight_layout()
+    plt.show()
+
+    # 3. Decidir cuántas mantener (Ejemplo: las Top 25)
+    N_FEATURES_A_MANTENER = 25 
+    features_top = df_importancias.head(N_FEATURES_A_MANTENER)['feature'].tolist()
+    
+    print(f"\nSe seleccionaron las {N_FEATURES_A_MANTENER} características principales.")
+    
+    # 4. Filtrar X_train y X_test para usar SOLO esas características
+    # ¡IMPORTANTE! Aplicamos el mismo filtro a ambos sets
+    X_train_final = X_train[features_top]
+    X_test_final = X_test[features_top]
+    
+    print("Selección de características completada.")
+    
+    # 5. Devolver los nuevos DataFrames filtrados
+    # (El scaler ya no se devuelve aquí, se usa en el paso 6)
+    # El cálculo de 'ratio_desbalanceo' se ha eliminado
+    # ya que era para XGBoost y no se usa en este pipeline.
+    print("Datos divididos y escalados.")
+    return X_train_final, X_test_final, y_train, y_test, scaler
+    
+    
+
+
+def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
+    """
+    *** LÓGICA CENTRAL: SMOTE + CatBoost ***
+    Configura y ejecuta GridSearchCV en un pipeline de SMOTE y CatBoost.
+    """
+    print("Iniciando búsqueda de hiperparámetros para SMOTE + CatBoost...")
+    
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
-    # 2. Modelo XGBoost optimizado
-    modelo_xgb = XGBClassifier(
-        random_state=random_state,
-        eval_metric='logloss',
-        max_depth=3,           # Profundidad reducida
-        learning_rate=0.05,    # Aprendizaje más lento
-        n_estimators=200,      # Número moderado de árboles
-        subsample=0.7,         # Subsample para regularización
-        colsample_bytree=0.7,  # Column subsample
-        reg_alpha=0.1,         # Regularización L1
-        reg_lambda=1,          # Regularización L2
-        use_label_encoder=False
+    # 1. Definir el modelo CatBoost
+    # Se omite 'class_weight' para dejar que SMOTE haga el trabajo de balanceo.
+    modelo_CB = CatBoostClassifier(
+        loss_function="Logloss",
+        eval_metric="Recall",                  # favorece FN bajos
+        depth=4,                               # baja profundidad → generaliza
+        learning_rate=0.08,                    # razonable para dataset pequeño
+        iterations=300,                        # moderado, controlado con early stopping
+        l2_leaf_reg=8,                         # regularización fuerte
+        random_seed=RANDOM_STATE_SEED,
+        bagging_temperature=1.0,               # más aleatoriedad → menos overfit
+        subsample=0.7,                         # datos estocásticos
+        colsample_bylevel=0.8,                 # columnas estocásticas
+        od_type="Iter",
+        verbose=False
     )
-
     # 2. Definir el Pipeline de Imbalanced-learn
     # 
-    pipeline_xgb = ImbPipeline([
-        ('smote', SMOTE(random_state=random_state)), # <-- Paso de sobremuestreo
-        ('model', modelo_xgb)                      # <-- Paso del modelo
+    pipeline_cb = ImbPipeline([
+        ('smote', SMOTE(random_state=RANDOM_STATE_SEED)), # Paso 1: Sobremuestreo
+        ('model', modelo_CB)               # Paso 2: Modelo
     ])
 
     # 3. Definir el GRID de parámetros para el pipeline
-    # (Los nombres deben incluir el prefijo del paso: 'model__...')
-    param_grid_xgb = {
-        'model__n_estimators': [100, 200, 300, 400, 500],
-        'model__max_depth': [3, 4],
-        'model__learning_rate': [0.01, 0.05, 0.1],
-        'model__subsample': [0.7, 1.0],
-        'model__colsample_bytree': [0.7, 1.0]
+    # (Los nombres deben incluir el prefijo 'model__')
+    param_grid_cb = {
+        'model__depth': [3, 4, 6],                  # Profundidad (controla complejidad)
+        'model__l2_leaf_reg': [3, 7, 10],           # Regularización L2 (muy importante)
+        'model__learning_rate': [0.03, 0.08],       # Tasa de aprendizaje
+        'model__subsample': [0.7, 0.8],             # Muestreo de filas (como bagging)
+        'model__colsample_bylevel': [0.7, 0.8],     # Muestreo de columnas
+        'model__bagging_temperature': [0.5, 1.0]    # Aleatoriedad extra en bagging
     }
     
-    total_combinaciones = np.prod([len(v) for v in param_grid_xgb.values()])
-    print(f"GridSearchCV (SMOTE+XGBoost) probará {total_combinaciones} combinaciones.")
+    total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])
+    print(f"GridSearchCV (SMOTE+RF) probará {total_combinaciones} combinaciones.")
+    print("Entrenando... (Esto puede tardar)")
 
-    # 4. Configurar la Búsqueda (GridSearchCV)
+    # 4. Configurar y ejecutar la Búsqueda (GridSearchCV)
     search_cv = GridSearchCV(
-        estimator=pipeline_xgb,
-        param_grid=param_grid_xgb,
+        estimator=pipeline_cb,
+        param_grid=param_grid_cb,
         cv=skf,
         scoring=f2_scorer,
         n_jobs=-1,
         verbose=2
     )
 
-    # 5. Entrenar
-    print("Entrenando GridSearchCV... Esto puede tardar.")
     search_cv.fit(X_train, y_train)
     
     mejor_modelo = search_cv.best_estimator_
-    print("Entrenamiento (GridSearchCV) de SMOTE + XGBoost completado.")
+    print("Entrenamiento (GridSearchCV) de SMOTE + CatBoost completado.")
     print(f"Mejores parámetros encontrados: {search_cv.best_params_}")
     print(f"Mejor score F2 (en CV): {search_cv.best_score_:.4f}")
     
@@ -425,14 +474,14 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     con el umbral por defecto (0.5).
     """
     # --- 1. Importancia de Características ---
-    # Extraer del paso 'model' del pipeline
     importancias = mejor_modelo.named_steps['model'].feature_importances_
     df_importancias = pd.DataFrame({
-        'predictor': feature_names,
+        'predictor': X_test.columns,
         'importancia': importancias
     }).sort_values(by='importancia', ascending=True)
 
-    print("\nImportancia de las 32 características (features) para el modelo XGBoost:")
+    # *** CORRECCIÓN ***: Título del print
+    print("\nImportancia de las 25 características (features) para el modelo SMOTE + RandomForest:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -440,41 +489,41 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     plt.yticks(size=8)
     ax.set_xlabel('Importancia de la Característica')
     ax.set_ylabel('Variable Predictora')
-    ax.set_title('Importancia de Características (XGBoost)')
+    # *** CORRECCIÓN ***: Título del gráfico
+    ax.set_title('Importancia de Características (SMOTE + CatBoost)')
     plt.tight_layout()
     plt.show()
 
     # --- 2. Matriz de Confusión (Umbral 0.5) ---
     predicciones_defecto = mejor_modelo.predict(X_test)
     matriz_confusion = confusion_matrix(y_test, predicciones_defecto)
-    titulo = "Matriz de Confusión - XGBoost (Umbral = 0.5)"
+    # *** CORRECCIÓN ***: Título del gráfico
+    titulo = "Matriz de Confusión - SMOTE + RF (Umbral = 0.5)"
     _plot_confusion_matrix(matriz_confusion, titulo)
 
 def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_minima, random_state):
     """
     Busca el umbral de decisión óptimo usando predicciones "Out-of-Fold" (OOF)
-    para evitar el sobreajuste del umbral.
+    Y ADEMÁS, grafica la relación entre el umbral, la precisión y el recall.
     """
     print(f"\nOptimizando umbral para: MAX(Recall) sujeto a Precision >= {precision_minima}...")
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
-    # 1. Obtener probabilidades "fuera de fold" (OOF) del set de entrenamiento.
-    # Este es el método más robusto para encontrar un umbral.
     print("Obteniendo predicciones de validación cruzada (OOF)...")
     y_probas_cv = cross_val_predict(
-        mejor_modelo, 
-        X_train, 
-        y_train, 
-        cv=skf, 
-        method='predict_proba', 
+        mejor_modelo,
+        X_train,
+        y_train,
+        cv=skf,
+        method='predict_proba',
         n_jobs=-1
-    )[:, 1] # Probabilidad de la clase "1" (defecto)
+    )[:, 1]
 
     # Listas para almacenar los valores para la gráfica
     lista_umbrales = np.linspace(0.01, 0.99, 1000)
     lista_precision = []
     lista_recall = []
-    
+
     # Lógica para encontrar el mejor umbral (idéntica a la original)
     best_recall = -1
     optimal_threshold = 0.5 # Valor de fallback
@@ -483,25 +532,24 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
     print("Calculando métricas para cada umbral...")
     for thresh in lista_umbrales:
         y_pred_thresh = np.where(y_probas_cv >= thresh, 1, 0)
-        
+
         prec = precision_score(y_train, y_pred_thresh, zero_division=0)
         rec = recall_score(y_train, y_pred_thresh, zero_division=0)
 
         # Almacenar valores para la gráfica
         lista_precision.append(prec)
         lista_recall.append(rec)
-        
+
         # Lógica de optimización
         if prec >= precision_minima:
             if rec > best_recall:
                 best_recall = rec
                 optimal_threshold = thresh
                 best_precision_at_best_recall = prec
-            elif rec == best_recall: 
-                # Si empata en Recall, preferir umbral mas bajo
+            elif rec == best_recall:
+                # Si el recall es el mismo, preferimos el umbral más bajo (menos restrictivo)
                 optimal_threshold = min(optimal_threshold, thresh)
 
-    # --- Comprobación y Fallback ---
     if best_recall == -1:
         print(f"¡ADVERTENCIA! No se encontró NINGÚN umbral que cumpla 'Precision >= {precision_minima}'.")
         print("El modelo no puede satisfacer este requisito. Usando 0.5 por defecto.")
@@ -511,7 +559,7 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
         print(f"   -> Umbral óptimo: {optimal_threshold:.4f}")
         print(f"   -> Recall resultante (en CV): {best_recall:.4f}")
         print(f"   -> Precision resultante (en CV): {best_precision_at_best_recall:.4f}")
-    
+
     # --- INICIO DE LA NUEVA SECCIÓN DE GRÁFICO ---
     print("Generando gráfico Precision-Recall vs. Umbral...")
     plt.figure(figsize=(12, 7))
@@ -542,7 +590,7 @@ def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_
     plt.xlim(0, 1.0)
     plt.show()
     # --- FIN DE LA NUEVA SECCIÓN DE GRÁFICO ---
-    
+
     return optimal_threshold
 
 def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, optimal_threshold, feature_names):
@@ -562,16 +610,18 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
 
     # --- 2. Matriz de Confusión (Umbral Óptimo) ---
     matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
-    titulo = f"Matriz de Confusión - XGBoost (Umbral Óptimo = {optimal_threshold:.4f})"
+    # *** CORRECCIÓN ***: Título del gráfico
+    titulo = f"Matriz de Confusión - SMOTE + RF (Umbral Óptimo = {optimal_threshold:.4f})"
     _plot_confusion_matrix(matriz_confusion_opt, titulo)
 
     # --- 3. Curva ROC ---
+    # 
     # *** CORRECCIÓN CRÍTICA ***: Usar probabilidades, no predicciones binarias.
     fpr, tpr, _ = metrics.roc_curve(y_test, predicciones_test_proba)
     auc_score = metrics.roc_auc_score(y_test, predicciones_test_proba)
     
     plt.figure()
-    plt.plot(fpr, tpr, label=f"SMOTE + XGBoost (AUC = {auc_score:.4f})")
+    plt.plot(fpr, tpr, label=f"SMOTE + RF (AUC = {auc_score:.4f})")
     plt.plot([0, 1], [0, 1], 'k--', label="Clasificador Aleatorio (AUC = 0.5)")
     plt.xlabel('Tasa de Falsos Positivos (FPR)')
     plt.ylabel('Tasa de Verdaderos Positivos (TPR)')
@@ -580,38 +630,45 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     plt.grid()
     plt.show()
 
-    # --- 4. Análisis de Errores (FN y FP) ---
-    print("\n--- ANÁLISIS DE ERRORES (Test Set) ---")
-    df_analisis = X_test.copy()
-    # Añadir columnas de resultados
-    df_analisis['Etiqueta_Real'] = y_test.values
+    # ==========================================================================
+    # PASO 4: Análisis de Errores (FN y FP)
+    # ==========================================================================
+    print("\n--- INICIANDO ANÁLISIS DE ERRORES EN EL TEST SET ---")
+
+    # 1. Crear el DataFrame de análisis BASADO en y_test.
+    # y_test SÍ conserva el índice original del DataFrame (ej. 145, 182, etc.)
+    df_analisis = pd.DataFrame(y_test)
+
+    # 2. Añadir las probabilidades y predicciones.
+    # Como son arrays de numpy, se asignarán en orden a las filas existentes.
     df_analisis['Probabilidad_Defecto'] = predicciones_test_proba
     df_analisis['Prediccion_Binaria'] = predicciones_test_binarias
-
-    # Falsos Negativos (El peor error)
-    condicion_FN = (df_analisis['Etiqueta_Real'] == 1) & (df_analisis['Prediccion_Binaria'] == 0)
+        
+    #--- FALSOS NEGATIVOS (FN) ---
+    # (Usamos 'Etiqueta_Defecto' como se llama en 'y_test')
+    condicion_FN = (df_analisis['Etiqueta_Defecto'] == 1) & (df_analisis['Prediccion_Binaria'] == 0)
     falsos_negativos = df_analisis[condicion_FN]
-    print(f"\n[INFORME] Se han encontrado {len(falsos_negativos)} Falsos Negativos (Defectos no detectados):")
-    print(falsos_negativos[['Etiqueta_Real', 'Probabilidad_Defecto', 'Prediccion_Binaria']].to_string())
+ 
+    print(f"\n[INFORME] Se han encontrado {len(falsos_negativos)} Falsos Negativos (Defectos NO detectados):")
+    # Imprimir solo las columnas relevantes
+    print(falsos_negativos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
 
-    # Falsos Positivos (Falsas alarmas)
-    condicion_FP = (df_analisis['Etiqueta_Real'] == 0) & (df_analisis['Prediccion_Binaria'] == 1)
+    # --- FALSOS POSITIVOS (FP) ---
+    condicion_FP = (df_analisis['Etiqueta_Defecto'] == 0) & (df_analisis['Prediccion_Binaria'] == 1)
     falsos_positivos = df_analisis[condicion_FP]
+ 
     print(f"\n[INFORME] Se han encontrado {len(falsos_positivos)} Falsos Positivos (Falsas Alarmas):")
-    print(falsos_positivos[['Etiqueta_Real', 'Probabilidad_Defecto', 'Prediccion_Binaria']].to_string())
-
+    print(falsos_positivos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
 
     # --- 5. Guardar Artefactos del Modelo ---
-    print("\nGuardando pipeline (SMOTE+XGBoost), scaler y umbral...")
-    # Guardamos el pipeline 'mejor_modelo' (que incluye SMOTE y XGB)
-    # y el 'scaler' (que debe aplicarse ANTES que el pipeline).
+    print("\nGuardando pipeline (SMOTE+RF), scaler y umbral...")
     artefactos_modelo = {
-        "pipeline_modelo": mejor_modelo, # Contiene SMOTE + XGBoost
+        "pipeline_modelo": mejor_modelo, # Contiene SMOTE + RandomForest
         "scaler": scaler,              # Debe aplicarse PRIMERO
         "umbral": optimal_threshold,
         "feature_names": feature_names
     }
-    with open('modelo_con_umbral_PEGADOS.pkl', 'wb') as f:
+    with open('modelo_con_umbral_PEGADOS_Hibrido.pkl', 'wb') as f:
         pickle.dump(artefactos_modelo, f)
 
     print(f"¡Proceso completado! Modelo guardado con umbral = {optimal_threshold:.4f}")
@@ -649,15 +706,15 @@ def main():
     if X is None:
         return
 
-    # PASO 2: Dividir, escalar y obtener ratio de desbalanceo
-    X_train, X_test, y_train, y_test, scaler, ratio_desbalanceo = paso_2_escalar_y_dividir_datos(
+    # PASO 2: Dividir y escalar los datos
+    X_train, X_test, y_train, y_test, scaler = paso_2_escalar_y_dividir_datos(
         X, y, TEST_SIZE_RATIO, RANDOM_STATE_SEED
     )
 
-    # PASO 3: Entrenar el pipeline SMOTE + XGBoost
+    # PASO 3: Entrenar el pipeline SMOTE + RandomForest
     mejor_modelo = paso_3_entrenar_modelo(
         X_train, y_train, 
-        N_SPLITS_CV, FBETA_BETA, ratio_desbalanceo, RANDOM_STATE_SEED
+        N_SPLITS_CV, FBETA_BETA, RANDOM_STATE_SEED
     )
 
     # PASO 4: Evaluación inicial (Importancia, CM con umbral 0.5)
@@ -665,7 +722,7 @@ def main():
         mejor_modelo, X_test, y_test, FEATURE_NAMES
     )
 
-    # PASO 5: Optimizar el umbral de decisión
+    # PASO 5: Optimizar el umbral de decisión (con PRECISION_MINIMA)
     optimal_threshold = paso_5_optimizar_umbral(
         mejor_modelo, X_train, y_train, 
         N_SPLITS_CV, PRECISION_MINIMA, RANDOM_STATE_SEED

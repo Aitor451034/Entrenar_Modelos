@@ -340,11 +340,63 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     X_train = pd.DataFrame(X_train_scaled, columns=train_cols)
     X_test = pd.DataFrame(X_test_scaled, columns=train_cols)
     
+    print("\n--- Iniciando Selección de Características ---")
+    
+    # 1. Entrenar un modelo "filtro" rápido SOLO en X_train
+    # (Usamos RandomForest, es rápido y bueno para esto)
+    from sklearn.ensemble import RandomForestClassifier
+    
+    # Usamos los datos escalados de X_train para el filtro
+    filtro_rf = RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1)
+    filtro_rf.fit(X_train, y_train) 
+
+    # 2. Obtener las importancias
+    importancias = filtro_rf.feature_importances_
+    df_importancias = pd.DataFrame({
+        'feature': X_train.columns, 
+        'importancia': importancias
+    }).sort_values(by='importancia', ascending=False)
+    
+    print("Importancia de características (modelo filtro):")
+    print(df_importancias.to_string())
+    
+    # ==========================================================================
+    # --- INICIO: CÓDIGO DE GRÁFICA AÑADIDO ---
+    # ==========================================================================
+    
+    print("Generando gráfica de importancia de características del filtro...")
+    
+    # Creamos una copia ordenada para la gráfica (ascendente para barh)
+    df_plot = df_importancias.sort_values(by='importancia', ascending=True)
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.barh(df_plot.feature, df_plot.importancia) # Usamos las columnas del df
+    plt.yticks(size=8)
+    ax.set_xlabel('Importancia de la Característica')
+    ax.set_ylabel('Variable Predictora')
+    ax.set_title('Importancia de Características (Modelo Filtro - RandomForest)') # Título adaptado
+    plt.tight_layout()
+    plt.show()
+
+    # 3. Decidir cuántas mantener (Ejemplo: las Top 25)
+    N_FEATURES_A_MANTENER = 25 
+    features_top = df_importancias.head(N_FEATURES_A_MANTENER)['feature'].tolist()
+    
+    print(f"\nSe seleccionaron las {N_FEATURES_A_MANTENER} características principales.")
+    
+    # 4. Filtrar X_train y X_test para usar SOLO esas características
+    # ¡IMPORTANTE! Aplicamos el mismo filtro a ambos sets
+    X_train_final = X_train[features_top]
+    X_test_final = X_test[features_top]
+    
+    print("Selección de características completada.")
+    
+    # 5. Devolver los nuevos DataFrames filtrados
+    # (El scaler ya no se devuelve aquí, se usa en el paso 6)
     # El cálculo de 'ratio_desbalanceo' se ha eliminado
     # ya que era para XGBoost y no se usa en este pipeline.
     print("Datos divididos y escalados.")
-    
-    return X_train, X_test, y_train, y_test, scaler
+    return X_train_final, X_test_final, y_train, y_test, scaler
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
@@ -420,7 +472,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     # --- 1. Importancia de Características ---
     importancias = mejor_modelo.named_steps['model'].feature_importances_
     df_importancias = pd.DataFrame({
-        'predictor': feature_names,
+        'predictor': X_test.columns,
         'importancia': importancias
     }).sort_values(by='importancia', ascending=True)
 

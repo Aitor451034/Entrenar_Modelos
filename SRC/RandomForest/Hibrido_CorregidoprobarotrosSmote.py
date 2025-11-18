@@ -359,7 +359,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         ('scaler', StandardScaler()),           # 1. Escalar
         ('smote', BorderlineSMOTE(random_state=random_state)), # Paso 2: Sobremuestreo
         ('selector', SelectFromModel(           # 3. Seleccionar Features
-            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1)
+            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1,step=1  # Elimina 1 a 1 (máxima precisión))
         )),
         ('model', modelo_hibrido_rf)               # Paso 4: Modelo
     ])

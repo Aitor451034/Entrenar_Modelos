@@ -353,7 +353,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('smote', SMOTE(random_state=RANDOM_STATE_SEED)), # Paso 1: Sobremuestreo
         ('selector', SelectFromModel(  # NUEVO: Selecciona features aquí
-            RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1)
+            RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1,step=1  # Elimina 1 a 1 (máxima precisión))
         )),
         ('model', LGBMClassifier(  # Tu modelo original
            objective="binary",

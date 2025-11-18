@@ -347,29 +347,13 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE_SEED)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
-    # 1. Definir el modelo XGB
-    # Se omite 'class_weight' para dejar que SMOTE haga el trabajo de balanceo.
-    modelo_xgb = XGBClassifier(
-        objective="binary:logistic",
-        eval_metric="logloss",
-        tree_method="hist",           # más rápido + estable
-        max_depth=3,                  # profundidad baja → menos sobreajuste
-        min_child_weight=5,           # muy importante para dataset pequeño
-        subsample=0.7,                # evita sobreajuste
-        colsample_bytree=0.7,
-        reg_alpha=5,                  # L1 fuerte
-        reg_lambda=5,                 # L2 fuerte
-        learning_rate=0.05,           # más estable que 0.1
-        n_estimators=300,             # se combina con early_stopping
-        random_state=RANDOM_STATE_SEED,
-    )
     # 2. Definir el Pipeline de Imbalanced-learn
     # 
     pipeline_xgb = ImbPipeline([
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('smote', SMOTE(random_state=random_state)),
         ('selector', SelectFromModel(  # NUEVO: Selecciona features aquí
-            RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1)
+            RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1,step=1  # Elimina 1 a 1 (máxima precisión))
         )),
         ('model', XGBClassifier(
         objective="binary:logistic",

@@ -32,12 +32,14 @@ from scipy.stats import skew, kurtosis
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
 from sklearn import metrics
+from sklearn.feature_selection import SelectFromModel
+from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -66,7 +68,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.68
+PRECISION_MINIMA = 0.7
 
 
 # ==============================================================================
@@ -321,7 +323,7 @@ def paso_1_cargar_y_preparar_datos(ruta_csv_defecto, feature_names):
 
 def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     """
-    Divide los datos en train/test y los escala usando StandardScaler.
+    Solo divide los datos. El escalado y selección pasan al pipeline del Paso 3.
     """
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, 
@@ -329,114 +331,82 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
         random_state=random_state, 
         stratify=y
     )
+    print("Datos divididos en Train y Test (sin escalar ni filtrar aún).")
     
-    train_cols = X_train.columns
-    
-    print("Escalando datos...")
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
-    X_train = pd.DataFrame(X_train_scaled, columns=train_cols)
-    X_test = pd.DataFrame(X_test_scaled, columns=train_cols)
-    
-    print("\n--- Iniciando Selección de Características ---")
-    
-    # 1. Entrenar un modelo "filtro" rápido SOLO en X_train
-    # (Usamos RandomForest, es rápido y bueno para esto)
-    from sklearn.ensemble import RandomForestClassifier
-    
-    # Usamos los datos escalados de X_train para el filtro
-    filtro_rf = RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1)
-    filtro_rf.fit(X_train, y_train) 
-
-    # 2. Obtener las importancias
-    importancias = filtro_rf.feature_importances_
-    df_importancias = pd.DataFrame({
-        'feature': X_train.columns, 
-        'importancia': importancias
-    }).sort_values(by='importancia', ascending=False)
-    
-    print("Importancia de características (modelo filtro):")
-    print(df_importancias.to_string())
-    
-    # ==========================================================================
-    # --- INICIO: CÓDIGO DE GRÁFICA AÑADIDO ---
-    # ==========================================================================
-    
-    print("Generando gráfica de importancia de características del filtro...")
-    
-    # Creamos una copia ordenada para la gráfica (ascendente para barh)
-    df_plot = df_importancias.sort_values(by='importancia', ascending=True)
-    
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.barh(df_plot.feature, df_plot.importancia) # Usamos las columnas del df
-    plt.yticks(size=8)
-    ax.set_xlabel('Importancia de la Característica')
-    ax.set_ylabel('Variable Predictora')
-    ax.set_title('Importancia de Características (Modelo Filtro - RandomForest)') # Título adaptado
-    plt.tight_layout()
-    plt.show()
-
-    # 3. Decidir cuántas mantener (Ejemplo: las Top 25)
-    N_FEATURES_A_MANTENER = 25 
-    features_top = df_importancias.head(N_FEATURES_A_MANTENER)['feature'].tolist()
-    
-    print(f"\nSe seleccionaron las {N_FEATURES_A_MANTENER} características principales.")
-    
-    # 4. Filtrar X_train y X_test para usar SOLO esas características
-    # ¡IMPORTANTE! Aplicamos el mismo filtro a ambos sets
-    X_train_final = X_train[features_top]
-    X_test_final = X_test[features_top]
-    
-    print("Selección de características completada.")
-    
-    # 5. Devolver los nuevos DataFrames filtrados
-    # (El scaler ya no se devuelve aquí, se usa en el paso 6)
-    # El cálculo de 'ratio_desbalanceo' se ha eliminado
-    # ya que era para XGBoost y no se usa en este pipeline.
-    print("Datos divididos y escalados.")
-    return X_train_final, X_test_final, y_train, y_test, scaler
+    # Devolvemos None en lugar del scaler para no romper la estructura del main, 
+    # aunque ya no se use aquí.
+    return X_train, X_test, y_train, y_test,None
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: SMOTE + RandomForest ***
+    *** LÓGICA CENTRAL: SMOTE + XGBoost ***
     Configura y ejecuta GridSearchCV en un pipeline de SMOTE y RandomForest.
     """
-    print("Iniciando búsqueda de hiperparámetros para SMOTE + RandomForest...")
+    print("Iniciando búsqueda de hiperparámetros para SMOTE + XGBoost...")
     
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE_SEED)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
-    # 1. Definir el modelo RandomForest
+    # 1. Definir el modelo XGB
     # Se omite 'class_weight' para dejar que SMOTE haga el trabajo de balanceo.
-    modelo_hibrido_rf = RandomForestClassifier(random_state=random_state)
-
+    modelo_xgb = XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",           # más rápido + estable
+        max_depth=3,                  # profundidad baja → menos sobreajuste
+        min_child_weight=5,           # muy importante para dataset pequeño
+        subsample=0.7,                # evita sobreajuste
+        colsample_bytree=0.7,
+        reg_alpha=5,                  # L1 fuerte
+        reg_lambda=5,                 # L2 fuerte
+        learning_rate=0.05,           # más estable que 0.1
+        n_estimators=300,             # se combina con early_stopping
+        random_state=RANDOM_STATE_SEED,
+    )
     # 2. Definir el Pipeline de Imbalanced-learn
     # 
-    pipeline_rf = ImbPipeline([
-        ('smote', SMOTE(random_state=random_state)), # Paso 1: Sobremuestreo
-        ('model', modelo_hibrido_rf)               # Paso 2: Modelo
+    pipeline_xgb = ImbPipeline([
+        ('scaler', StandardScaler()),  # NUEVO: Escala aquí
+        ('smote', SMOTE(random_state=random_state)),
+        ('selector', SelectFromModel(  # NUEVO: Selecciona features aquí
+            RandomForestClassifier(n_estimators=1000, random_state=random_state, n_jobs=-1)
+        )),
+        ('model', XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",           # más rápido + estable
+        max_depth=3,                  # profundidad baja → menos sobreajuste
+        min_child_weight=5,           # muy importante para dataset pequeño
+        subsample=0.7,                # evita sobreajuste
+        colsample_bytree=0.7,
+        reg_alpha=5,                  # L1 fuerte
+        reg_lambda=5,                 # L2 fuerte
+        learning_rate=0.05,           # más estable que 0.1
+        n_estimators=300,             # se combina con early_stopping
+        random_state=RANDOM_STATE_SEED,
+        ))
     ])
 
     # 3. Definir el GRID de parámetros para el pipeline
     # (Los nombres deben incluir el prefijo 'model__')
-    param_grid_rf = {
-        'model__n_estimators': [200, 300, 400],
-        'model__max_depth': [5, 7, 10],         # Se quita 'None' para evitar overfitting
-        'model__min_samples_leaf': [3, 5, 10],    # > 1 fuerza a generalizar
-        'model__min_samples_split': [2, 5, 10],
-        'model__max_features': ['sqrt', 'log2']
+    param_grid_xgb = {
+        'model__max_depth': [2, 3, 4],
+        'model__min_child_weight': [3, 5, 7],
+        'model__subsample': [0.6, 0.8],
+        'model__colsample_bytree': [0.6, 0.8],
+        'model__reg_alpha': [2, 5, 10],
+        'model__reg_lambda': [2, 5, 10],
+        'model__learning_rate': [0.03, 0.05]
     }
     
-    total_combinaciones = np.prod([len(v) for v in param_grid_rf.values()])
-    print(f"GridSearchCV (SMOTE+RF) probará {total_combinaciones} combinaciones.")
+    total_combinaciones = np.prod([len(v) for v in param_grid_xgb.values()])
+    print(f"GridSearchCV (SMOTE+XGB) probará {total_combinaciones} combinaciones.")
     print("Entrenando... (Esto puede tardar)")
 
     # 4. Configurar y ejecutar la Búsqueda (GridSearchCV)
     search_cv = GridSearchCV(
-        estimator=pipeline_rf,
-        param_grid=param_grid_rf,
+        estimator=pipeline_xgb,
+        param_grid=param_grid_xgb,
         cv=skf,
         scoring=f2_scorer,
         n_jobs=-1,
@@ -457,12 +427,25 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     Grafica la importancia de características y la matriz de confusión
     con el umbral por defecto (0.5).
     """
-    # --- 1. Importancia de Características ---
+   # --- 1. Recuperar nombres correctos tras la selección ---
+    selector = mejor_modelo.named_steps['selector']
+    mask = selector.get_support()
+    
+    # Filtramos los nombres de las 32 columnas originales
+    nombres_finales = np.array(feature_names)[mask]
+    
+    # Obtenemos importancias del modelo
     importancias = mejor_modelo.named_steps['model'].feature_importances_
+
+    # --- 2. Crear DataFrame ---
     df_importancias = pd.DataFrame({
-        'predictor': X_test.columns,
+        'predictor': nombres_finales,
         'importancia': importancias
     }).sort_values(by='importancia', ascending=True)
+
+    print(f"\nImportancia de las {len(df_importancias)} características seleccionadas:")
+    print(df_importancias.sort_values(by='importancia', ascending=False))
+
 
     # *** CORRECCIÓN ***: Título del print
     print("\nImportancia de las 32 características (features) para el modelo SMOTE + RandomForest:")
@@ -645,14 +628,18 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     print(falsos_positivos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
 
     # --- 5. Guardar Artefactos del Modelo ---
-    print("\nGuardando pipeline (SMOTE+RF), scaler y umbral...")
+    print("\nGuardando pipeline COMPLETO (Scaler+SMOTE+Selector+Modelo) y umbral...")
+    
     artefactos_modelo = {
-        "pipeline_modelo": mejor_modelo, # Contiene SMOTE + RandomForest
-        "scaler": scaler,              # Debe aplicarse PRIMERO
+        "pipeline_completo": mejor_modelo, # ¡Aquí va todo junto!
         "umbral": optimal_threshold,
-        "feature_names": feature_names
+        "feature_names_originales": feature_names # Guardamos los nombres para referencia futura
     }
-    with open('modelo_con_umbral_PEGADOS_Hibrido.pkl', 'wb') as f:
+    
+    # Ajusta el nombre del archivo según el modelo que estés usando (RF o CatBoost)
+    nombre_archivo = 'modelo_con_umbral_PEGADOS_PipelineCompleto.pkl'
+    
+    with open(nombre_archivo, 'wb') as f:
         pickle.dump(artefactos_modelo, f)
 
     print(f"¡Proceso completado! Modelo guardado con umbral = {optimal_threshold:.4f}")

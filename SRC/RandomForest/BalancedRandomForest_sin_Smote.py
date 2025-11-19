@@ -39,7 +39,7 @@ from sklearn.metrics import (
 )
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
-from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
+from sklearn.feature_selection import RFE
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -353,7 +353,9 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     pipeline_BRF = ImbPipeline([
         ('scaler', StandardScaler()),           # 1. Escalar
         ('selector', SelectFromModel(           # 2. Seleccionar Features
-            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1,step=1  # Elimina 1 a 1 (máxima precisión))
+            RFE(n_estimators=100, random_state=random_state, n_jobs=-1,),
+            step=1,  # Elimina 1 a 1 (máxima precisión)
+            verbose=0
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,

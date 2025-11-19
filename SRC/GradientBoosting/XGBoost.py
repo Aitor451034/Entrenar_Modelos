@@ -399,7 +399,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         param_grid=param_grid_xgb,
         cv=skf,
         scoring=f2_scorer,
-        n_jobs=-1,
+        n_jobs=1,
         verbose=2
     )
 

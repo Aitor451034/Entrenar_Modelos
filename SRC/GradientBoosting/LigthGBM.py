@@ -365,7 +365,6 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             n_estimators=300,       # valor razonable, afinado vía grid
             verbose=-1,
             device_type='gpu', # Indica a LightGBM que use la GPU
-            n_jobs=-1
             ))
     ])
     
@@ -394,7 +393,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         param_grid=param_grid_lgbm,
         cv=kfold,
         scoring=f2_scorer,
-        n_jobs=-1,
+        n_jobs=1,
         verbose=2
     )
 

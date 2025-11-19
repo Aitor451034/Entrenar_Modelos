@@ -355,8 +355,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('smote', SMOTE(random_state=random_state)),
         ('selector', RFE(  # NUEVO: Selecciona features aquí
-            RandomForestClassifier(n_estimators=200, random_state=random_state, n_jobs=-1),
-            step=1,  # Elimina 1 a 1 (máxima precisión))
+            RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1),
+            step=0.2,  # Elimina 1 a 1 (máxima precisión))
             verbose=0
         )),
         ('model', CatBoostClassifier(  # Tu modelo original
@@ -364,15 +364,14 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             eval_metric="Recall",
             depth=4,
             learning_rate=0.08,
+            bootstrap_type='Bernoulli', # Necesario para usar subsample
             iterations=300,
             l2_leaf_reg=8,
             random_seed=random_state,
-            bagging_temperature=1.0,
             subsample=0.7,
-            colsample_bylevel=0.8,
             od_type="Iter",
             verbose=False,
-            task_type="GPU" # ¡La clave para usar GPU
+            #task_type="GPU" # ¡La clave para usar GPU
         ))
     ])
 
@@ -382,10 +381,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__depth': [3, 4, 6],                  # Profundidad (controla complejidad)
         'model__l2_leaf_reg': [3, 7, 10],           # Regularización L2 (muy importante)
         'model__learning_rate': [0.03, 0.08],       # Tasa de aprendizaje
-        'model__subsample': [0.7, 0.8],             # Muestreo de filas (como bagging)
-        'model__colsample_bylevel': [0.7, 0.8],     # Muestreo de columnas
-        'model__bagging_temperature': [0.5, 1.0],    # Aleatoriedad extra en bagging
-        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
+        'model__subsample': [0.7, 0.8],             # Muestreo de filas (como bagging
+        'selector__n_features_to_select': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])

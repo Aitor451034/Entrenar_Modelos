@@ -40,6 +40,7 @@ from sklearn.metrics import (
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -353,8 +354,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     pipeline_cb = ImbPipeline([
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('smote', SMOTE(random_state=random_state)),
-        ('selector', SelectFromModel(  # NUEVO: Selecciona features aquí
-            RFE(n_estimators=1000, random_state=random_state, n_jobs=-1,),
+        ('selector', RFE(  # NUEVO: Selecciona features aquí
+            RandomForestClassifier(n_estimators=200, random_state=random_state, n_jobs=-1),
             step=1,  # Elimina 1 a 1 (máxima precisión))
             verbose=0
         )),
@@ -370,7 +371,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             subsample=0.7,
             colsample_bylevel=0.8,
             od_type="Iter",
-            verbose=False
+            verbose=False,
+            task_type="GPU" # ¡La clave para usar GPU
         ))
     ])
 
@@ -383,7 +385,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__subsample': [0.7, 0.8],             # Muestreo de filas (como bagging)
         'model__colsample_bylevel': [0.7, 0.8],     # Muestreo de columnas
         'model__bagging_temperature': [0.5, 1.0],    # Aleatoriedad extra en bagging
-        'selector__max_features': [25]              # --- Parámetros del Selector ---#
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])

@@ -40,6 +40,7 @@ from sklearn.metrics import (
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -352,8 +353,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     pipeline_lgbm = ImbPipeline(steps=[
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('smote', SMOTE(random_state=RANDOM_STATE_SEED)), # Paso 1: Sobremuestreo
-        ('selector', SelectFromModel(  # NUEVO: Selecciona features aquí
-            RFE(n_estimators=1000, random_state=random_state, n_jobs=-1,),
+        ('selector', RFE(  # NUEVO: Selecciona features aquí
+            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1,),
             step=1,  # Elimina 1 a 1 (máxima precisión)
             verbose=0
         )),
@@ -362,7 +363,9 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             boosting_type="gbdt",
             random_state=RANDOM_STATE_SEED,
             n_estimators=300,       # valor razonable, afinado vía grid
-            verbose=-1
+            verbose=-1,
+            device_type='gpu', # Indica a LightGBM que use la GPU
+            n_jobs=-1
             ))
     ])
     
@@ -377,7 +380,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         "model__bagging_fraction": [0.6, 0.8, 1.0],
         "model__bagging_freq": [1, 3, 5],        # bagging activo
         "model__lambda_l1": [0.0, 0.1, 0.5],
-        "model__lambda_l2": [0.0, 0.1, 0.5]
+        "model__lambda_l2": [0.0, 0.1, 0.5],
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#]
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_lgbm.values()])

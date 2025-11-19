@@ -40,6 +40,7 @@ from sklearn.metrics import (
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -352,8 +353,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     
     pipeline_BRF = ImbPipeline([
         ('scaler', StandardScaler()),           # 1. Escalar
-        ('selector', SelectFromModel(           # 2. Seleccionar Features
-            RFE(n_estimators=100, random_state=random_state, n_jobs=-1,),
+        ('selector', RFE(           # 2. Seleccionar Features
+            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1,),
             step=1,  # Elimina 1 a 1 (máxima precisión)
             verbose=0
         )),
@@ -376,7 +377,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         "model__max_depth": [4, 6, 8],          # <--- ESTO evita el sobreajuste (profundidad baja)
         "model__min_samples_leaf": [5, 10],     # <--- ESTO obliga a generalizar (grupos grandes)
         "model__max_features": ["sqrt"],        # <--- ESTO reduce la varianza
-        "model__class_weight": ["balanced", "balanced_subsample"] 
+        "model__class_weight": ["balanced", "balanced_subsample"],
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_BRF.values()])

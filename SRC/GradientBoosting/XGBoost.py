@@ -40,6 +40,7 @@ from sklearn.metrics import (
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -352,15 +353,14 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     pipeline_xgb = ImbPipeline([
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('smote', SMOTE(random_state=random_state)),
-        ('selector', SelectFromModel(  # NUEVO: Selecciona features aquí
-            RFE(n_estimators=1000, random_state=random_state, n_jobs=-1,)
+        ('selector', RFE(  # NUEVO: Selecciona features aquí
+            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1),
             step=1,  # Elimina 1 a 1 (máxima precisión)
             verbose=0
         )),
         ('model', XGBClassifier(
         objective="binary:logistic",
         eval_metric="logloss",
-        tree_method="hist",           # más rápido + estable
         max_depth=3,                  # profundidad baja → menos sobreajuste
         min_child_weight=5,           # muy importante para dataset pequeño
         subsample=0.7,                # evita sobreajuste
@@ -370,6 +370,9 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         learning_rate=0.05,           # más estable que 0.1
         n_estimators=300,             # se combina con early_stopping
         random_state=RANDOM_STATE_SEED,
+        # --- CONFIGURACIÓN DE LA GPU ---
+        tree_method='gpu_hist',       # Corregido: String, NO lista
+        predictor='gpu_predictor'    # Corregido: String, NO lista
         ))
     ])
 
@@ -382,7 +385,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__colsample_bytree': [0.6, 0.8],
         'model__reg_alpha': [2, 5, 10],
         'model__reg_lambda': [2, 5, 10],
-        'model__learning_rate': [0.03, 0.05]
+        'model__learning_rate': [0.03, 0.05],
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_xgb.values()])

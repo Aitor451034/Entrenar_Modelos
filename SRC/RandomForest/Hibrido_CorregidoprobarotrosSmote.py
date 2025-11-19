@@ -41,6 +41,7 @@ from sklearn import metrics
 from imblearn.over_sampling import BorderlineSMOTE
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
@@ -374,7 +375,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__max_depth': [5, 7, 10],         # Se quita 'None' para evitar overfitting
         'model__min_samples_leaf': [3, 5, 10],    # > 1 fuerza a generalizar
         'model__min_samples_split': [2, 5, 10],
-        'model__max_features': ['sqrt', 'log2']
+        'model__max_features': ['sqrt', 'log2'],
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_rf.values()])

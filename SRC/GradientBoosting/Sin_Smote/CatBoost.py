@@ -1,17 +1,17 @@
 """
-Script para entrenar un modelo Híbrido (SMOTE + Random Forest)
+Script para entrenar un modelo de CatBoost
 con el objetivo de detectar puntos de soldadura defectuosos (pegados).
 
 El proceso incluye:
 1.  Carga de datos y extracción de 32 características (feature engineering).
 2.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
-3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
+3.  Definición de un pipeline que:
     a. Aplica SMOTE para sobremuestrear la clase minoritaria.
     b. Entrena un modelo RandomForestClassifier.
 4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
 5.  Optimización del umbral de decisión (Regla de Sinergia).
 6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
-7.  Guardado del pipeline completo (SMOTE + Scaler + RF) y el umbral.
+7.  Guardado del pipeline completo Casboost y el umbral.
 """
 
 # ==============================================================================
@@ -76,33 +76,36 @@ PRECISION_MINIMA = 0.77
 # ==============================================================================
 # (Funciones idénticas a las versiones anteriores, colapsadas por brevedad)
 
-def leer_archivo(ruta_csv_defecto):
-    """Lee un archivo CSV con datos de soldadura."""
-    print("Abriendo archivo ...")
+def leer_archivo():
+    """Abre un diálogo para seleccionar un archivo CSV y lo carga como DataFrame."""
+    print("Selecciona el archivo CSV que contiene los datos...")
+    root = tk.Tk()
+    root.withdraw()
+
+    ruta_csv = filedialog.askopenfilename(
+        title="Seleccionar archivo CSV",
+        filetypes=[("Archivos CSV", "*.csv")]
+    )
+
+    if not ruta_csv:
+        print("Operación cancelada por el usuario.")
+        return None
+
     try:
-        df = pd.read_csv(ruta_csv_defecto, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",", skiprows=3)
-        print("¡Archivo CSV leído correctamente desde la ruta por defecto!")
-        return df
-    except FileNotFoundError:
-        print("No se ha encontrado el archivo en la ruta por defecto. Abriendo diálogo...")
-        root = tk.Tk()
-        root.withdraw()
-        ruta_csv_manual = filedialog.askopenfilename(
-            title="Seleccionar archivo que contiene los datos",
-            filetypes=[("Archivos de CSV", "*.csv")]
+        df = pd.read_csv(
+            ruta_csv,
+            encoding="utf-8",
+            sep=";",
+            on_bad_lines="skip",
+            header=None,
+            quotechar='"',
+            decimal=",",
+            skiprows=3
         )
-        if not ruta_csv_manual:
-            print("Operación cancelada por el usuario.")
-            return None
-        try:
-            df = pd.read_csv(ruta_csv_manual, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",")
-            print("¡Archivo CSV leído correctamente desde la ruta seleccionada!")
-            return df
-        except Exception as e:
-            print(f"Se produjo un error al leer el archivo seleccionado: {e}")
-            return None
+        print("¡Archivo CSV leído correctamente!")
+        return df
     except Exception as e:
-        print(f"Se produjo un error inesperado al leer el archivo: {e}")
+        print(f"Error al leer el archivo: {e}")
         return None
 
 def calcular_pendiente(resistencias, tiempos):
@@ -299,9 +302,9 @@ def extraer_features_fila_por_fila(new_df):
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
 # ==============================================================================
 
-def paso_1_cargar_y_preparar_datos(ruta_csv_defecto, feature_names):
+def paso_1_cargar_y_preparar_datos(feature_names):
     """Orquesta la carga de datos y la creación de los DataFrames X e y."""
-    df_raw = leer_archivo(ruta_csv_defecto)
+    df_raw = leer_archivo()
     if df_raw is None:
         return None, None
     df_preprocesado = preprocesar_dataframe_inicial(df_raw)
@@ -343,7 +346,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + CatBoost) ***
     Configura y ejecuta GridSearchCV en un pipeline completo para prevenir Data Leakage.
     """
-    print("Iniciando búsqueda de hiperparámetros para Pipeline Completo (Scaler + SMOTE + Selector + CB)...")
+    print("Iniciando búsqueda de hiperparámetros para Pipeline Completo (Scaler + Selector + CB)...")
     
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
@@ -397,7 +400,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])
-    print(f"GridSearchCV (SMOTE+RF) probará {total_combinaciones} combinaciones.")
+    print(f"GridSearchCV (CB) probará {total_combinaciones} combinaciones.")
     print("Entrenando... (Esto puede tardar)")
 
     # 4. Configurar y ejecutar la Búsqueda (GridSearchCV)
@@ -454,7 +457,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     ax.set_xlabel('Importancia de la Característica')
     ax.set_ylabel('Variable Predictora')
     # *** CORRECCIÓN ***: Título del gráfico
-    ax.set_title('Importancia de Características (SMOTE + CatBoost)')
+    ax.set_title('Importancia de Características (CatBoost)')
     plt.tight_layout()
     plt.show()
 
@@ -462,7 +465,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     predicciones_defecto = mejor_modelo.predict(X_test)
     matriz_confusion = confusion_matrix(y_test, predicciones_defecto)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = "Matriz de Confusión - SMOTE + RF (Umbral = 0.5)"
+    titulo = "Matriz de Confusión - CATBOOST (Umbral = 0.5)"
     _plot_confusion_matrix(matriz_confusion, titulo)
 
 def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_minima, random_state):
@@ -575,7 +578,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     # --- 2. Matriz de Confusión (Umbral Óptimo) ---
     matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = f"Matriz de Confusión - SMOTE + RF (Umbral Óptimo = {optimal_threshold:.4f})"
+    titulo = f"Matriz de Confusión - CATBOOST (Umbral Óptimo = {optimal_threshold:.4f})"
     _plot_confusion_matrix(matriz_confusion_opt, titulo)
 
     # --- 3. Curva ROC ---
@@ -585,7 +588,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     auc_score = metrics.roc_auc_score(y_test, predicciones_test_proba)
     
     plt.figure()
-    plt.plot(fpr, tpr, label=f"SMOTE + RF (AUC = {auc_score:.4f})")
+    plt.plot(fpr, tpr, label=f"CATBOOST (AUC = {auc_score:.4f})")
     plt.plot([0, 1], [0, 1], 'k--', label="Clasificador Aleatorio (AUC = 0.5)")
     plt.xlabel('Tasa de Falsos Positivos (FPR)')
     plt.ylabel('Tasa de Verdaderos Positivos (TPR)')
@@ -670,7 +673,7 @@ def main():
     Función principal que orquesta todo el pipeline de ML.
     """
     # PASO 1: Cargar y procesar los datos crudos
-    X, y = paso_1_cargar_y_preparar_datos(RUTA_CSV_POR_DEFECTO, FEATURE_NAMES)
+    X, y = paso_1_cargar_y_preparar_datos(FEATURE_NAMES)
     if X is None:
         return
 

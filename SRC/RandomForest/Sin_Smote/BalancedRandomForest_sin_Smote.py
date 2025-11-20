@@ -51,8 +51,6 @@ from imblearn.over_sampling import SMOTE
 # 2. CONSTANTES Y CONFIGURACIÓN
 # ==============================================================================
 
-RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Datos_Titanio25-26.csv"
-
 FEATURE_NAMES = [
     "rango_r_beta_alfa", "rango_t_e_beta", "rango_r_e_beta", "resistencia_inicial",
     "k4", "k3", "rango_intercuartilico", "desv_pre_mitad_t",
@@ -77,33 +75,36 @@ PRECISION_MINIMA = 0.68
 # ==============================================================================
 # (Funciones idénticas a las versiones anteriores, colapsadas por brevedad)
 
-def leer_archivo(ruta_csv_defecto):
-    """Lee un archivo CSV con datos de soldadura."""
-    print("Abriendo archivo ...")
+def leer_archivo():
+    """Abre un diálogo para seleccionar un archivo CSV y lo carga como DataFrame."""
+    print("Selecciona el archivo CSV que contiene los datos...")
+    root = tk.Tk()
+    root.withdraw()
+
+    ruta_csv = filedialog.askopenfilename(
+        title="Seleccionar archivo CSV",
+        filetypes=[("Archivos CSV", "*.csv")]
+    )
+
+    if not ruta_csv:
+        print("Operación cancelada por el usuario.")
+        return None
+
     try:
-        df = pd.read_csv(ruta_csv_defecto, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",", skiprows=3)
-        print("¡Archivo CSV leído correctamente desde la ruta por defecto!")
-        return df
-    except FileNotFoundError:
-        print("No se ha encontrado el archivo en la ruta por defecto. Abriendo diálogo...")
-        root = tk.Tk()
-        root.withdraw()
-        ruta_csv_manual = filedialog.askopenfilename(
-            title="Seleccionar archivo que contiene los datos",
-            filetypes=[("Archivos de CSV", "*.csv")]
+        df = pd.read_csv(
+            ruta_csv,
+            encoding="utf-8",
+            sep=";",
+            on_bad_lines="skip",
+            header=None,
+            quotechar='"',
+            decimal=",",
+            skiprows=3
         )
-        if not ruta_csv_manual:
-            print("Operación cancelada por el usuario.")
-            return None
-        try:
-            df = pd.read_csv(ruta_csv_manual, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",")
-            print("¡Archivo CSV leído correctamente desde la ruta seleccionada!")
-            return df
-        except Exception as e:
-            print(f"Se produjo un error al leer el archivo seleccionado: {e}")
-            return None
+        print("¡Archivo CSV leído correctamente!")
+        return df
     except Exception as e:
-        print(f"Se produjo un error inesperado al leer el archivo: {e}")
+        print(f"Error al leer el archivo: {e}")
         return None
 
 def calcular_pendiente(resistencias, tiempos):
@@ -300,9 +301,9 @@ def extraer_features_fila_por_fila(new_df):
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
 # ==============================================================================
 
-def paso_1_cargar_y_preparar_datos(ruta_csv_defecto, feature_names):
+def paso_1_cargar_y_preparar_datos(feature_names):
     """Orquesta la carga de datos y la creación de los DataFrames X e y."""
-    df_raw = leer_archivo(ruta_csv_defecto)
+    df_raw = leer_archivo()
     if df_raw is None:
         return None, None
     df_preprocesado = preprocesar_dataframe_inicial(df_raw)
@@ -652,7 +653,7 @@ def main():
     Función principal que orquesta todo el pipeline de ML.
     """
     # PASO 1: Cargar y procesar los datos crudos
-    X, y = paso_1_cargar_y_preparar_datos(RUTA_CSV_POR_DEFECTO, FEATURE_NAMES)
+    X, y = paso_1_cargar_y_preparar_datos(FEATURE_NAMES)
     if X is None:
         return
 

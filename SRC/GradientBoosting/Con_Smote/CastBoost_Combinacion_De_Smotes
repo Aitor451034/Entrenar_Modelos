@@ -1,17 +1,17 @@
 """
-Script para entrenar un modelo Híbrido (SMOTE + Random Forest)
+Script para entrenar un modelo de CatBoost
 con el objetivo de detectar puntos de soldadura defectuosos (pegados).
 
 El proceso incluye:
 1.  Carga de datos y extracción de 32 características (feature engineering).
 2.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
-3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
+3.  Definición de un pipeline que:
     a. Aplica SMOTE para sobremuestrear la clase minoritaria.
     b. Entrena un modelo RandomForestClassifier.
 4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
 5.  Optimización del umbral de decisión (Regla de Sinergia).
 6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
-7.  Guardado del pipeline completo (SMOTE + Scaler + RF) y el umbral.
+7.  Guardado del pipeline completo Casboost y el umbral.
 """
 
 # ==============================================================================
@@ -32,21 +32,21 @@ from scipy.stats import skew, kurtosis
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
+from catboost import CatBoostClassifier
 from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
 from sklearn import metrics
-from imblearn.over_sampling import BorderlineSMOTE
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
-
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
-from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline # <--- USAR ESTE PIPELINE
+from imblearn.combine import SMOTETomek 
+from imblearn.over_sampling import BorderlineSMOTE
+from imblearn.under_sampling import TomekLinks
 
 
 # ==============================================================================
@@ -71,7 +71,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.68
+PRECISION_MINIMA = 0.77
 
 
 # ==============================================================================
@@ -79,33 +79,36 @@ PRECISION_MINIMA = 0.68
 # ==============================================================================
 # (Funciones idénticas a las versiones anteriores, colapsadas por brevedad)
 
-def leer_archivo(ruta_csv_defecto):
-    """Lee un archivo CSV con datos de soldadura."""
-    print("Abriendo archivo ...")
+def leer_archivo():
+    """Abre un diálogo para seleccionar un archivo CSV y lo carga como DataFrame."""
+    print("Selecciona el archivo CSV que contiene los datos...")
+    root = tk.Tk()
+    root.withdraw()
+
+    ruta_csv = filedialog.askopenfilename(
+        title="Seleccionar archivo CSV",
+        filetypes=[("Archivos CSV", "*.csv")]
+    )
+
+    if not ruta_csv:
+        print("Operación cancelada por el usuario.")
+        return None
+
     try:
-        df = pd.read_csv(ruta_csv_defecto, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",", skiprows=3)
-        print("¡Archivo CSV leído correctamente desde la ruta por defecto!")
-        return df
-    except FileNotFoundError:
-        print("No se ha encontrado el archivo en la ruta por defecto. Abriendo diálogo...")
-        root = tk.Tk()
-        root.withdraw()
-        ruta_csv_manual = filedialog.askopenfilename(
-            title="Seleccionar archivo que contiene los datos",
-            filetypes=[("Archivos de CSV", "*.csv")]
+        df = pd.read_csv(
+            ruta_csv,
+            encoding="utf-8",
+            sep=";",
+            on_bad_lines="skip",
+            header=None,
+            quotechar='"',
+            decimal=",",
+            skiprows=3
         )
-        if not ruta_csv_manual:
-            print("Operación cancelada por el usuario.")
-            return None
-        try:
-            df = pd.read_csv(ruta_csv_manual, encoding="utf-8", sep=";", on_bad_lines="skip", header=None, quotechar='"', decimal=",")
-            print("¡Archivo CSV leído correctamente desde la ruta seleccionada!")
-            return df
-        except Exception as e:
-            print(f"Se produjo un error al leer el archivo seleccionado: {e}")
-            return None
+        print("¡Archivo CSV leído correctamente!")
+        return df
     except Exception as e:
-        print(f"Se produjo un error inesperado al leer el archivo: {e}")
+        print(f"Error al leer el archivo: {e}")
         return None
 
 def calcular_pendiente(resistencias, tiempos):
@@ -302,9 +305,9 @@ def extraer_features_fila_por_fila(new_df):
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
 # ==============================================================================
 
-def paso_1_cargar_y_preparar_datos(ruta_csv_defecto, feature_names):
+def paso_1_cargar_y_preparar_datos(feature_names):
     """Orquesta la carga de datos y la creación de los DataFrames X e y."""
-    df_raw = leer_archivo(ruta_csv_defecto)
+    df_raw = leer_archivo()
     if df_raw is None:
         return None, None
     df_preprocesado = preprocesar_dataframe_inicial(df_raw)
@@ -342,61 +345,107 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: SMOTE + RandomForest ***
-    Configura y ejecuta GridSearchCV en un pipeline de SMOTE y RandomForest.
+    *** LÓGICA: Pipeline Híbrido Avanzado (BorderlineSMOTETomek) ***
+    - Genera datos en fronteras difíciles (Borderline).
+    - Limpia ruido SOLO de la clase mayoritaria (Tomek Majority) para proteger los pocos positivos.
+    - Selecciona 15, 20 o 25 features (RFE).
+    - Entrena CatBoost.
     """
-    print("Iniciando búsqueda de hiperparámetros para SMOTE + RandomForest...")
-    
+    print(f"Iniciando búsqueda Híbrida con selección de features (15, 20, 25)...")
+
+    # Validación Cruzada Estratificada
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
-    # 1. Definir el modelo RandomForest
-    # Se omite 'class_weight' para dejar que SMOTE haga el trabajo de balanceo.
-    modelo_hibrido_rf = RandomForestClassifier(random_state=random_state)
+    # ---------------------------------------------------------
+    # 1. CONFIGURACIÓN DEL SAMPLING (La parte crítica)
+    # ---------------------------------------------------------
+    
+    # A) Generador: BorderlineSMOTE
+    # Usamos k_neighbors=3 para que no falle en folds con pocos datos.
+    smote_borderline = BorderlineSMOTE(
+        kind='borderline-1',
+        k_neighbors=3,     
+        m_neighbors=5,     
+        random_state=random_state
+    )
 
-    # 2. Definir el Pipeline de Imbalanced-learn
-    # 
-    pipeline_rf = ImbPipeline([
-        ('scaler', StandardScaler()),           # 1. Escalar
-        ('smote', BorderlineSMOTE(random_state=random_state)), # Paso 2: Sobremuestreo
-        ('selector', RFE(           # 3. Seleccionar Features
-            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1,),
-            step=1,  # Elimina 1 a 1 (máxima precisión)
-            verbose=0
-        )),
-        ('model', modelo_hibrido_rf)               # Paso 4: Modelo
+    # B) Limpiador: TomekLinks
+    # sampling_strategy='majority': IMPORTANTE.
+    # Solo elimina datos de la clase 0 si confunden al modelo. 
+    # La clase 1 (minoritaria) se deja INTACTA para no perder información real.
+    tomek_protegido = TomekLinks(sampling_strategy='majority')
+
+    # C) Combinación: SMOTETomek
+    smote_tomek_custom = SMOTETomek(
+        smote=smote_borderline,
+        tomek=tomek_protegido,
+        random_state=random_state
+    )
+    # ---------------------------------------------------------
+    # 2. DEFINICIÓN DEL PIPELINE
+    # ---------------------------------------------------------
+    # NOTA: Aquí metemos el scaler y el selector
+    pipeline_cb = ImbPipeline([
+    ('scaler', StandardScaler()),
+    ('smote', BorderlineSMOTE(
+        kind='borderline-1',
+        k_neighbors=3,
+        m_neighbors=5,
+        random_state=random_state
+    )),
+    ('tomek', TomekLinks(sampling_strategy='majority')),
+    ('selector', RFE(
+        RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1),
+        step=0.1,
+        verbose=0
+    )),
+    ('model', CatBoostClassifier(
+        loss_function="Logloss",
+        eval_metric="Recall",
+        depth=4,
+        learning_rate=0.05,
+        bootstrap_type='Bernoulli',
+        iterations=500,
+        l2_leaf_reg=8,
+        random_seed=random_state,
+        subsample=0.7,
+        od_type="Iter",
+        verbose=False,
+        ))  
     ])
+
 
     # 3. Definir el GRID de parámetros para el pipeline
     # (Los nombres deben incluir el prefijo 'model__')
-    param_grid_rf = {
-        'smote': [BorderlineSMOTE(random_state=random_state)],
-        'model__n_estimators': [200, 300, 400],
-        'model__max_depth': [5, 7, 10],         # Se quita 'None' para evitar overfitting
-        'model__min_samples_leaf': [3, 5, 10],    # > 1 fuerza a generalizar
-        'model__min_samples_split': [2, 5, 10],
-        'model__max_features': ['sqrt', 'log2'],
-        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
+    param_grid_cb = {
+        'model__depth': [4, 6, 8],                  # Profundidad (controla complejidad)
+        'model__l2_leaf_reg': [3, 7],           # Regularización L2 (muy importante)
+        'model__learning_rate': [0.03, 0.06],       # Tasa de aprendizaje
+        'model__subsample': [0.7, 0.85],             # Muestreo de filas (como bagging)
+        'model__min_data_in_leaf': [1, 5],           # Regularización extra para datasets pequeños (NUEVO)
+        'selector__n_features_to_select': [15 ,20 ,25]  # --- Parámetros del Selector ---#
     }
     
-    total_combinaciones = np.prod([len(v) for v in param_grid_rf.values()])
-    print(f"GridSearchCV (SMOTE+RF) probará {total_combinaciones} combinaciones.")
+    total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])
+    print(f"GridSearchCV (CB) probará {total_combinaciones} combinaciones.")
     print("Entrenando... (Esto puede tardar)")
 
     # 4. Configurar y ejecutar la Búsqueda (GridSearchCV)
     search_cv = GridSearchCV(
-        estimator=pipeline_rf,
-        param_grid=param_grid_rf,
+        estimator=pipeline_cb,
+        param_grid=param_grid_cb,
         cv=skf,
         scoring=f2_scorer,
         n_jobs=-1,
-        verbose=2
+        verbose=2,
+        refit=True
     )
 
     search_cv.fit(X_train, y_train)
     
     mejor_modelo = search_cv.best_estimator_
-    print("Entrenamiento (GridSearchCV) de SMOTE + RandomForest completado.")
+    print("Entrenamiento (GridSearchCV) de SMOTE + CatBoost completado.")
     print(f"Mejores parámetros encontrados: {search_cv.best_params_}")
     print(f"Mejor score F2 (en CV): {search_cv.best_score_:.4f}")
     
@@ -427,7 +476,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     # *** CORRECCIÓN ***: Título del print
-    print("\nImportancia de las 32 características (features) para el modelo SMOTE + RandomForest:")
+    print("\nImportancia de las 25 características (features) para el modelo SMOTE + RandomForest:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -436,7 +485,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     ax.set_xlabel('Importancia de la Característica')
     ax.set_ylabel('Variable Predictora')
     # *** CORRECCIÓN ***: Título del gráfico
-    ax.set_title('Importancia de Características (SMOTE + RandomForest)')
+    ax.set_title('Importancia de Características (CatBoost)')
     plt.tight_layout()
     plt.show()
 
@@ -444,7 +493,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     predicciones_defecto = mejor_modelo.predict(X_test)
     matriz_confusion = confusion_matrix(y_test, predicciones_defecto)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = "Matriz de Confusión - SMOTE + RF (Umbral = 0.5)"
+    titulo = "Matriz de Confusión - CATBOOST (Umbral = 0.5)"
     _plot_confusion_matrix(matriz_confusion, titulo)
 
 def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_minima, random_state):
@@ -557,7 +606,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     # --- 2. Matriz de Confusión (Umbral Óptimo) ---
     matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = f"Matriz de Confusión - SMOTE + RF (Umbral Óptimo = {optimal_threshold:.4f})"
+    titulo = f"Matriz de Confusión - CATBOOST (Umbral Óptimo = {optimal_threshold:.4f})"
     _plot_confusion_matrix(matriz_confusion_opt, titulo)
 
     # --- 3. Curva ROC ---
@@ -567,7 +616,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     auc_score = metrics.roc_auc_score(y_test, predicciones_test_proba)
     
     plt.figure()
-    plt.plot(fpr, tpr, label=f"SMOTE + RF (AUC = {auc_score:.4f})")
+    plt.plot(fpr, tpr, label=f"CATBOOST (AUC = {auc_score:.4f})")
     plt.plot([0, 1], [0, 1], 'k--', label="Clasificador Aleatorio (AUC = 0.5)")
     plt.xlabel('Tasa de Falsos Positivos (FPR)')
     plt.ylabel('Tasa de Verdaderos Positivos (TPR)')
@@ -652,7 +701,7 @@ def main():
     Función principal que orquesta todo el pipeline de ML.
     """
     # PASO 1: Cargar y procesar los datos crudos
-    X, y = paso_1_cargar_y_preparar_datos(RUTA_CSV_POR_DEFECTO, FEATURE_NAMES)
+    X, y = paso_1_cargar_y_preparar_datos(FEATURE_NAMES)
     if X is None:
         return
 

@@ -43,7 +43,9 @@ from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
-from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as ImbPipeline 
+from imblearn.combine import SMOTETomek # <--- Cambio principal: Librería combine
+from imblearn.over_sampling import SMOTE # Necesario para configurar los vecinos
 
 
 
@@ -349,10 +351,28 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     kfold = StratifiedKFold(n_splits=N_SPLITS_CV,shuffle=True,random_state=RANDOM_STATE_SEED)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
+    # 1. Configurar el SMOTE base para dataset pequeño
+    # Es crucial definir k_neighbors=3 (o 2) porque con 283 datos,
+    # un fold de validación podría dejar muy pocos positivos en el train.
+    # Si usamos el default (5), podría dar error.
+    smote_base = SMOTE(
+        k_neighbors=3, 
+        random_state=random_state
+    )
+
+    # 2. Definir SMOTETomek usando el SMOTE base configurado
+    # sampling_strategy='auto' equilibrará las clases y luego Tomek limpiará los bordes.
+    smote_tomek = SMOTETomek(
+        smote=smote_base,
+        random_state=random_state,
+        sampling_strategy='auto' 
+    )
+
     # 2. Definir el Pipeline de Imbalanced-learn
     # 
-    pipeline_lgbm = Pipeline(steps=[
+    pipeline_lgbm = ImbPipeline(steps=[
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
+        ('sampling', smote_tomek), # <--- Genera datos y limpia ruido SOLO en el conjunto de Train
         ('selector', RFE(  # NUEVO: Selecciona features aquí
             RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1,),
             step=0.1,  # Elimina 1 a 1 (máxima precisión)

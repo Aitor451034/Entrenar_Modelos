@@ -1,5 +1,5 @@
 """
-Script para entrenar un modelo Híbrido (SMOTE + Ligth GBM)
+Script para entrenar un modelo Híbrido (SMOTE + Random Forest)
 con el objetivo de detectar puntos de soldadura defectuosos (pegados).
 
 El proceso incluye:
@@ -7,7 +7,7 @@ El proceso incluye:
 2.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
 3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
     a. Aplica SMOTE para sobremuestrear la clase minoritaria.
-    b. Entrena un modelo LGMBClassifier.
+    b. Entrena un modelo RandomForestClassifier.
 4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
 5.  Optimización del umbral de decisión (Regla de Sinergia).
 6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
@@ -32,7 +32,7 @@ from scipy.stats import skew, kurtosis
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
 from sklearn.preprocessing import StandardScaler
-from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
@@ -43,8 +43,9 @@ from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
-from sklearn.pipeline import Pipeline
-
+from imblearn.pipeline import Pipeline as ImbPipeline 
+from imblearn.combine import SMOTETomek # <--- Cambio principal: Librería combine
+from imblearn.over_sampling import SMOTE # Necesario para configurar los vecinos
 
 
 # ==============================================================================
@@ -67,14 +68,13 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.68
+PRECISION_MINIMA = 0.7
 
 
 # ==============================================================================
 # 3. FUNCIONES DE CARGA Y EXTRACCIÓN DE CARACTERÍSTICAS
 # ==============================================================================
 # (Funciones idénticas a las versiones anteriores, colapsadas por brevedad)
-
 def leer_archivo():
     """Abre un diálogo para seleccionar un archivo CSV y lo carga como DataFrame."""
     print("Selecciona el archivo CSV que contiene los datos...")
@@ -341,59 +341,82 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + SMOTE + Selector + CatBoost) ***
-    Configura y ejecuta GridSearchCV en un pipeline completo para prevenir Data Leakage.
+    *** LÓGICA CENTRAL: SMOTE + XGBoost ***
+    Configura y ejecuta GridSearchCV en un pipeline de SMOTE y RandomForest.
     """
-    print("Iniciando búsqueda de hiperparámetros para SMOTE + LightGBM...")
+    print("Iniciando búsqueda de hiperparámetros para SMOTE + XGBoost...")
     
-    kfold = StratifiedKFold(n_splits=N_SPLITS_CV,shuffle=True,random_state=RANDOM_STATE_SEED)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE_SEED)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
+
+    # 1. Configurar el SMOTE base para dataset pequeño
+    # Es crucial definir k_neighbors=3 (o 2) porque con 283 datos,
+    # un fold de validación podría dejar muy pocos positivos en el train.
+    # Si usamos el default (5), podría dar error.
+    smote_base = SMOTE(
+        k_neighbors=3, 
+        random_state=random_state
+    )
+
+    # 2. Definir SMOTETomek usando el SMOTE base configurado
+    # sampling_strategy='auto' equilibrará las clases y luego Tomek limpiará los bordes.
+    smote_tomek = SMOTETomek(
+        smote=smote_base,
+        random_state=random_state,
+        sampling_strategy='auto' 
+    )
 
     # 2. Definir el Pipeline de Imbalanced-learn
     # 
-    pipeline_lgbm = Pipeline(steps=[
+    pipeline_xgb = ImbPipeline([
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
+        ('sampling', smote_tomek), # <--- Genera datos y limpia ruido SOLO en el conjunto de Train
         ('selector', RFE(  # NUEVO: Selecciona features aquí
-            RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1,),
+            RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1),
             step=0.1,  # Elimina 1 a 1 (máxima precisión)
             verbose=0
         )),
-        ('model', LGBMClassifier(  # Tu modelo original
-           objective="binary",
-            boosting_type="gbdt",
-            random_state=RANDOM_STATE_SEED,
-            n_estimators=300,       # valor razonable, afinado vía grid
-            verbose=-1,
-            is_unbalanced=True
-            #---PARÁMETROS PARA PROCESAR CON GPU----#
-            #device_type='gpu', # Indica a LightGBM que use la GPU
-            ))
+        ('model', XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        max_depth=3,                  # profundidad baja → menos sobreajuste
+        min_child_weight=5,           # muy importante para dataset pequeño
+        subsample=0.7,                # evita sobreajuste
+        colsample_bytree=0.7,
+        reg_alpha=5,                  # L1 fuerte
+        reg_lambda=5,                 # L2 fuerte
+        learning_rate=0.05,           # más estable que 0.1
+        n_estimators=300,             # se combina con early_stopping
+        random_state=RANDOM_STATE_SEED,
+        scale_pos_weight = 168 / 113
+        # --- CONFIGURACIÓN DE LA GPU ---
+        #tree_method='gpu_hist',       # Corregido: String, NO lista
+        #predictor='gpu_predictor'    # Corregido: String, NO lista
+        ))
     ])
-    
+
     # 3. Definir el GRID de parámetros para el pipeline
     # (Los nombres deben incluir el prefijo 'model__')
-    param_grid_lgbm = {
-        "model__num_leaves": [7, 15, 31],       # hojas pequeñas → evita sobreajuste
-        "model__max_depth": [3, 4, 5],          # árboles muy poco profundos
-        "model__learning_rate": [0.03, 0.05, 0.1],
-        "model__min_data_in_leaf": [20, 30, 50],  # regularización fuerte
-        "model__feature_fraction": [0.6, 0.8, 1.0],
-        "model__bagging_fraction": [0.6, 0.8, 1.0],
-        "model__bagging_freq": [1, 3, 5],        # bagging activo
-        "model__lambda_l1": [0.0, 0.1, 0.5],
-        "model__lambda_l2": [0.0, 0.1, 0.5],
-        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#]
+    param_grid_xgb = {
+        'model__max_depth': [2, 3, 4],
+        'model__min_child_weight': [3, 5, 7],
+        'model__subsample': [0.6, 0.8],
+        'model__colsample_bytree': [0.6, 0.8],
+        'model__reg_alpha': [2, 5, 10],
+        'model__reg_lambda': [2, 5, 10],
+        'model__learning_rate': [0.03, 0.05],
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
-    total_combinaciones = np.prod([len(v) for v in param_grid_lgbm.values()])
-    print(f"GridSearchCV (SMOTE+ligthGBM) probará {total_combinaciones} combinaciones.")
+    total_combinaciones = np.prod([len(v) for v in param_grid_xgb.values()])
+    print(f"GridSearchCV (SMOTE+XGB) probará {total_combinaciones} combinaciones.")
     print("Entrenando... (Esto puede tardar)")
 
     # 4. Configurar y ejecutar la Búsqueda (GridSearchCV)
     search_cv = GridSearchCV(
-        estimator=pipeline_lgbm,
-        param_grid=param_grid_lgbm,
-        cv=kfold,
+        estimator=pipeline_xgb,
+        param_grid=param_grid_xgb,
+        cv=skf,
         scoring=f2_scorer,
         n_jobs=-1,
         verbose=2
@@ -402,7 +425,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     search_cv.fit(X_train, y_train)
     
     mejor_modelo = search_cv.best_estimator_
-    print("Entrenamiento (GridSearchCV) de SMOTE + LigthGBM completado.")
+    print("Entrenamiento (GridSearchCV) de SMOTE + RandomForest completado.")
     print(f"Mejores parámetros encontrados: {search_cv.best_params_}")
     print(f"Mejor score F2 (en CV): {search_cv.best_score_:.4f}")
     
@@ -432,8 +455,9 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     print(f"\nImportancia de las {len(df_importancias)} características seleccionadas:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
+
     # *** CORRECCIÓN ***: Título del print
-    print("\nImportancia de las 32 características (features) para el modelo SMOTE + LightGBM:")
+    print("\nImportancia de las 32 características (features) para el modelo SMOTE + RandomForest:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -442,7 +466,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     ax.set_xlabel('Importancia de la Característica')
     ax.set_ylabel('Variable Predictora')
     # *** CORRECCIÓN ***: Título del gráfico
-    ax.set_title('Importancia de Características (SMOTE + LGBM)')
+    ax.set_title('Importancia de Características (SMOTE + RandomForest)')
     plt.tight_layout()
     plt.show()
 
@@ -450,7 +474,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     predicciones_defecto = mejor_modelo.predict(X_test)
     matriz_confusion = confusion_matrix(y_test, predicciones_defecto)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = "Matriz de Confusión - SMOTE + LGBM (Umbral = 0.5)"
+    titulo = "Matriz de Confusión - SMOTE + RF (Umbral = 0.5)"
     _plot_confusion_matrix(matriz_confusion, titulo)
 
 def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_minima, random_state):
@@ -563,7 +587,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     # --- 2. Matriz de Confusión (Umbral Óptimo) ---
     matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = f"Matriz de Confusión - SMOTE + LGBM (Umbral Óptimo = {optimal_threshold:.4f})"
+    titulo = f"Matriz de Confusión - SMOTE + RF (Umbral Óptimo = {optimal_threshold:.4f})"
     _plot_confusion_matrix(matriz_confusion_opt, titulo)
 
     # --- 3. Curva ROC ---
@@ -573,7 +597,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     auc_score = metrics.roc_auc_score(y_test, predicciones_test_proba)
     
     plt.figure()
-    plt.plot(fpr, tpr, label=f"SMOTE + LGBM (AUC = {auc_score:.4f})")
+    plt.plot(fpr, tpr, label=f"SMOTE + RF (AUC = {auc_score:.4f})")
     plt.plot([0, 1], [0, 1], 'k--', label="Clasificador Aleatorio (AUC = 0.5)")
     plt.xlabel('Tasa de Falsos Positivos (FPR)')
     plt.ylabel('Tasa de Verdaderos Positivos (TPR)')

@@ -43,8 +43,7 @@ from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
-from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE
+from sklearn.pipeline import Pipeline
 
 
 # ==============================================================================
@@ -350,12 +349,11 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
 
     # 2. Definir el Pipeline de Imbalanced-learn
     # 
-    pipeline_xgb = ImbPipeline([
+    pipeline_xgb = Pipeline([
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
-        ('smote', SMOTE(random_state=random_state)),
         ('selector', RFE(  # NUEVO: Selecciona features aquí
-            RandomForestClassifier(n_estimators=100, random_state=random_state, n_jobs=-1),
-            step=1,  # Elimina 1 a 1 (máxima precisión)
+            RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1),
+            step=0.1,  # Elimina 1 a 1 (máxima precisión)
             verbose=0
         )),
         ('model', XGBClassifier(
@@ -370,9 +368,10 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         learning_rate=0.05,           # más estable que 0.1
         n_estimators=300,             # se combina con early_stopping
         random_state=RANDOM_STATE_SEED,
+        scale_pos_weight = 168 / 113
         # --- CONFIGURACIÓN DE LA GPU ---
-        tree_method='gpu_hist',       # Corregido: String, NO lista
-        predictor='gpu_predictor'    # Corregido: String, NO lista
+        #tree_method='gpu_hist',       # Corregido: String, NO lista
+        #predictor='gpu_predictor'    # Corregido: String, NO lista
         ))
     ])
 

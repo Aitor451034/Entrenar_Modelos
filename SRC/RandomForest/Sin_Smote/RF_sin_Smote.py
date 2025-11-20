@@ -32,15 +32,16 @@ from scipy.stats import skew, kurtosis
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
 from sklearn.preprocessing import StandardScaler
-from catboost import CatBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
-from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
+from sklearn.feature_selection import RFE
+
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -69,7 +70,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.77
+PRECISION_MINIMA = 0.68
 
 
 # ==============================================================================
@@ -338,72 +339,61 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     # aunque ya no se use aquí.
     return X_train, X_test, y_train, y_test,None
 
-
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + SMOTE + Selector + CatBoost) ***
-    Configura y ejecuta GridSearchCV en un pipeline completo para prevenir Data Leakage.
+    *** LÓGICA CENTRAL: SMOTE + RandomForest ***
+    Configura y ejecuta GridSearchCV en un pipeline de SMOTE y RandomForest.
     """
-    print("Iniciando búsqueda de hiperparámetros para Pipeline Completo (Scaler + SMOTE + Selector + CB)...")
+    print("Iniciando búsqueda de hiperparámetros para SMOTE + RandomForest...")
     
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
-    ## 1. Definir el Pipeline COMPLETO
-    # NOTA: Aquí metemos el scaler y el selector
-    pipeline_cb = ImbPipeline([
-        ('scaler', StandardScaler()),  # NUEVO: Escala aquí
-        ('smote', SMOTE(random_state=random_state)),
-        ('selector', RFE(  # NUEVO: Selecciona features aquí
+    # 1. Definir el modelo RandomForest
+    # Se omite 'class_weight' para dejar que SMOTE haga el trabajo de balanceo.
+    modelo_hibrido_rf = RandomForestClassifier(random_state=random_state,class_weight='balanced')
+
+    # 2. Definir el Pipeline de Imbalanced-learn
+    # 
+    pipeline_rf = ImbPipeline([
+        ('scaler', StandardScaler()),           # 1. Escalar
+        ('selector', RFE(           # 3. Seleccionar Features
             RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1),
-            step=0.2,  # Elimina 1 a 1 (máxima precisión))
+            step=1,  # Elimina de uno en uno 
             verbose=0
         )),
-        ('model', CatBoostClassifier(  # Tu modelo original
-            loss_function="Logloss",
-            eval_metric="Recall",
-            depth=4,
-            learning_rate=0.08,
-            bootstrap_type='Bernoulli', # Necesario para usar subsample
-            iterations=300,
-            l2_leaf_reg=8,
-            random_seed=random_state,
-            subsample=0.7,
-            od_type="Iter",
-            verbose=False,
-            #task_type="GPU" # ¡La clave para usar GPU
-        ))
+        ('model', modelo_hibrido_rf)               # Paso 4: Modelo
     ])
 
     # 3. Definir el GRID de parámetros para el pipeline
     # (Los nombres deben incluir el prefijo 'model__')
-    param_grid_cb = {
-        'model__depth': [3, 4, 6],                  # Profundidad (controla complejidad)
-        'model__l2_leaf_reg': [3, 7, 10],           # Regularización L2 (muy importante)
-        'model__learning_rate': [0.03, 0.08],       # Tasa de aprendizaje
-        'model__subsample': [0.7, 0.8],             # Muestreo de filas (como bagging
-        'selector__n_features_to_select': [15 ,20 ,25]              # --- Parámetros del Selector ---#
+    param_grid_rf = {
+        'model__n_estimators': [200, 300, 400],
+        'model__max_depth': [5, 7, 10],         # Se quita 'None' para evitar overfitting
+        'model__min_samples_leaf': [3, 5, 10],    # > 1 fuerza a generalizar
+        'model__min_samples_split': [2, 5, 10],
+        'model__max_features': ['sqrt', 'log2'],
+        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
     }
     
-    total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])
+    total_combinaciones = np.prod([len(v) for v in param_grid_rf.values()])
     print(f"GridSearchCV (SMOTE+RF) probará {total_combinaciones} combinaciones.")
     print("Entrenando... (Esto puede tardar)")
 
     # 4. Configurar y ejecutar la Búsqueda (GridSearchCV)
     search_cv = GridSearchCV(
-        estimator=pipeline_cb,
-        param_grid=param_grid_cb,
+        estimator=pipeline_rf,
+        param_grid=param_grid_rf,
         cv=skf,
         scoring=f2_scorer,
         n_jobs=-1,
-        verbose=2,
-        refit=True
+        verbose=2
     )
 
     search_cv.fit(X_train, y_train)
     
     mejor_modelo = search_cv.best_estimator_
-    print("Entrenamiento (GridSearchCV) de SMOTE + CatBoost completado.")
+    print("Entrenamiento (GridSearchCV) de SMOTE + RandomForest completado.")
     print(f"Mejores parámetros encontrados: {search_cv.best_params_}")
     print(f"Mejor score F2 (en CV): {search_cv.best_score_:.4f}")
     
@@ -434,7 +424,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     # *** CORRECCIÓN ***: Título del print
-    print("\nImportancia de las 25 características (features) para el modelo SMOTE + RandomForest:")
+    print("\nImportancia de las 32 características (features) para el modelo SMOTE + RandomForest:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -443,7 +433,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     ax.set_xlabel('Importancia de la Característica')
     ax.set_ylabel('Variable Predictora')
     # *** CORRECCIÓN ***: Título del gráfico
-    ax.set_title('Importancia de Características (SMOTE + CatBoost)')
+    ax.set_title('Importancia de Características (SMOTE + RandomForest)')
     plt.tight_layout()
     plt.show()
 

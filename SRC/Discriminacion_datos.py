@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Cargar el archivo CSV
-ruta_csv = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Inputs_modelo_pegado_con_datos4_mas.csv"
+ruta_csv = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Datos_Titanio25-26.csv"
 df = pd.read_csv(ruta_csv, sep=";", low_memory=False)
 
 # Verificar que la columna 99 existe

@@ -384,7 +384,9 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             subsample=0.7,
             od_type="Iter",
             verbose=False,
-            class_weights=class_weights
+            class_weights=class_weights,
+            task_type="GPU",    #Para poder usar la GPU.
+            devices='0'
         ))
     ])
 
@@ -409,7 +411,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         param_grid=param_grid_cb,
         cv=skf,
         scoring=f2_scorer,
-        n_jobs=-1,
+        #n_jobs=-1,
         verbose=2,
         refit=True
     )

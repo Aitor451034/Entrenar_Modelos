@@ -355,7 +355,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         ('scaler', StandardScaler()),  # NUEVO: Escala aquí
         ('selector', RFE(  # NUEVO: Selecciona features aquí
             RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1,),
-            step=0.1,  # Elimina 1 a 1 (máxima precisión)
+            step=0.1,  # Elimina el 10% (máxima precisión)
             verbose=0
         )),
         ('model', LGBMClassifier(  # Tu modelo original
@@ -373,15 +373,15 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     # 3. Definir el GRID de parámetros para el pipeline
     # (Los nombres deben incluir el prefijo 'model__')
     param_grid_lgbm = {
-        "model__num_leaves": [7, 15, 31],       # hojas pequeñas → evita sobreajuste
-        "model__max_depth": [3, 4, 5],          # árboles muy poco profundos
-        "model__learning_rate": [0.03, 0.05, 0.1],
-        "model__min_data_in_leaf": [20, 30, 50],  # regularización fuerte
-        "model__feature_fraction": [0.6, 0.8, 1.0],
-        "model__bagging_fraction": [0.6, 0.8, 1.0],
-        "model__bagging_freq": [1, 3, 5],        # bagging activo
-        "model__lambda_l1": [0.0, 0.1, 0.5],
-        "model__lambda_l2": [0.0, 0.1, 0.5],
+        "model__num_leaves": [7,40],       # hojas pequeñas → evita sobreajuste
+        "model__max_depth": [ 4, 5],          # árboles muy poco profundos
+        "model__learning_rate": [0.01, 0.1],
+        "model__min_data_in_leaf": [20, 50],  # regularización fuerte
+        "model__feature_fraction": [0.6, 0.8],
+        "model__bagging_fraction": [0.6, 0.8],
+        "model__bagging_freq": [1, 5],        # bagging activo
+        "model__lambda_l1": [0.1, 0.5],
+        "model__lambda_l2": [0.1, 0.5],
         'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#]
     }
     

@@ -37,6 +37,7 @@ from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
+from sklearn.model_selection import learning_curve
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
@@ -665,6 +666,52 @@ def _plot_confusion_matrix(cm, title):
     plt.xlabel('Predicción')
     plt.show()
 
+def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
+    """
+    Genera la curva de aprendizaje para visualizar Bias y Varianza.
+    """
+    print("\nGenerando Curvas de Aprendizaje...")
+    
+    # Usamos learning_curve de sklearn
+    train_sizes, train_scores, val_scores = learning_curve(
+        modelo, 
+        X, 
+        y, 
+        cv=cv, 
+        scoring=scoring_metric, # Puedes usar tu make_scorer(fbeta...) aquí
+        n_jobs=-1,
+        train_sizes=np.linspace(0.1, 1.0, 10), # 10 puntos del 10% al 100% de datos
+        shuffle=True
+    )
+
+    # Calculamos medias y desviaciones  
+    train_mean = np.mean(train_scores, axis=1)
+    train_std = np.std(train_scores, axis=1)
+    val_mean = np.mean(val_scores, axis=1)
+    val_std = np.std(val_scores, axis=1)
+
+    # Graficamos
+    plt.figure(figsize=(10, 6))
+    
+    # Curva de Entrenamiento
+    plt.plot(train_sizes, train_mean, 'o-', color="r", label="Score Entrenamiento")
+    plt.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.1, color="r")
+    
+    # Curva de Validación
+    plt.plot(train_sizes, val_mean, 'o-', color="g", label="Score Validación (CV)")
+    plt.fill_between(train_sizes, val_mean - val_std, val_mean + val_std, alpha=0.1, color="g")
+
+    plt.title(f"Curva de Aprendizaje (Bias vs Varianza) - {scoring_metric}")
+    plt.xlabel("Tamaño del Set de Entrenamiento (muestras)")
+    plt.ylabel("Score")
+    plt.legend(loc="best")
+    plt.grid()
+    plt.show()
+
+    # Interpretación automática simple
+    gap_final = train_mean[-1] - val_mean[-1]
+    print(f"Gap final entre Train y Val: {gap_final:.4f}")
+
 
 # ==============================================================================
 # 5. PUNTO DE ENTRADA PRINCIPAL
@@ -704,6 +751,20 @@ def main():
     # PASO 6: Evaluación final (Reporte, CM, ROC, Errores) y Guardado
     paso_6_evaluacion_final_y_guardado(
         mejor_modelo, X_test, y_test, scaler, optimal_threshold, FEATURE_NAMES
+    )
+    
+    # Definimos el CV para la gráfica (mismo que usaste arriba)
+    cv_plot = StratifiedKFold(n_splits=N_SPLITS_CV, shuffle=True, random_state=RANDOM_STATE_SEED)
+    
+    # Creamos el scorer F2 (para que la gráfica mida lo mismo que tu optimización)
+    f2_scorer = make_scorer(fbeta_score, beta=FBETA_BETA)
+
+    paso_extra_graficar_bias_varianza(
+        modelo=mejor_modelo, 
+        X=X_train,     # Usamos TRAIN para ver la curva de aprendizaje interna
+        y=y_train, 
+        cv=cv_plot, 
+        scoring_metric=f2_scorer # O puedes poner 'f1' o 'recall' si prefieres
     )
 
 

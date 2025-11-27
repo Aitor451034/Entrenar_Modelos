@@ -842,7 +842,6 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     print(f"  Archivo: {nombre_archivo}")
     print("  (Este archivo contiene TODO lo necesario para hacer nuevas predicciones)")
 
-
 def _plot_confusion_matrix(cm, title):
     """
     Función auxiliar para graficar una matriz de confusión de manera visual.
@@ -876,13 +875,11 @@ def _plot_confusion_matrix(cm, title):
     plt.xlabel('Predicción')
     plt.show()
 
-
 def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
     """
     Genera la curva de aprendizaje para visualizar Bias y Varianza.
     
     La curva de aprendizaje es fundamental para diagnosticar problemas del modelo:
-    
     - Si TRAIN score es ALTO y VALIDATION score es BAJO → OVERFITTING (alta varianza)
       Solución: regularización, menos features, más datos
       
@@ -962,7 +959,50 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
     else:
         print("✗ Gap grande: Overfitting significativo, considera regularización")
 
+    # ==== INTERPRETACIÓN AUTOMÁTICA DEL GAP TRAIN-VALIDACIÓN ====
+    # El "gap" (brecha) entre el score de entrenamiento y validación es un indicador
+    # clave del estado del modelo:
+    # - Gap pequeño (< 0.05) → El modelo generaliza bien, sin overfitting
+    # - Gap moderado (0.05-0.10) → Overfitting leve, aceptable en muchos casos
+    # - Gap grande (> 0.10) → Overfitting significativo, necesita regularización
+    
+    # Calcular la brecha final (diferencia entre último punto de Train y Validación)
+    # Un valor positivo significa que Train > Validación (típico en overfitting)
+    gap_final = train_mean[-1] - val_mean[-1]
+    
+    # El sesgo aproximado se estima como (1 - mejor_score_validación)
+    # Un sesgo alto significa que el modelo ni siquiera en entrenamiento logra buen score
+    # Esto indicaría que el modelo es demasiado simple (underfitting)
+    bias_final = 1 - val_mean[-1]
+    
+    # La varianza aproximada se asimila al gap train-validación
+    # Una varianza alta significa que el modelo memoriza entrenamiento pero falla en validación
+    # Esto indicaría que el modelo es demasiado complejo (overfitting)
+    varianza_final = gap_final
 
+    # --- IMPRIMIR MÉTRICAS DE DIAGNOSIS ---
+    print(f"Gap final entre Train y Validación: {gap_final:.4f}")
+    print(f"Sesgo (aprox): {bias_final:.4f}")
+    print(f"Varianza (aprox): {varianza_final:.4f}")
+
+    # --- DIAGNOSIS AUTOMÁTICA DEL ESTADO DEL MODELO ---
+    # Basada en el tamaño del gap, proporcionar recomendaciones al usuario
+    if gap_final < 0.05:
+        # Caso IDEAL: El modelo generaliza bien
+        # Train y Validación tienen scores similares → sin memorización
+        print("✓ Gap pequeño: El modelo tiene buen balance (sin overfitting notable)")
+    elif gap_final < 0.10:
+        # Caso ACEPTABLE: Hay cierto overfitting pero dentro de límites tolerables
+        # El modelo aprendió algunos patrones específicos del entrenamiento,
+        # pero aún generaliza razonablemente bien a datos nuevos
+        print("⚠ Gap moderado: Cierto overfitting, pero aceptable")
+    else:
+        # Caso PROBLEMÁTICO: Overfitting severo
+        # El modelo funciona muy bien en entrenamiento pero falla en validación
+        # Causas posibles: modelo muy complejo, pocos datos, sin regularización
+        # Soluciones: aumentar regularización L2, reducir profundidad de árboles,
+        # añadir más datos de entrenamiento, usar dropout
+        print("✗ Gap grande: Overfitting significativo, considera regularización")
 
 # ==============================================================================
 # 5. PUNTO DE ENTRADA PRINCIPAL

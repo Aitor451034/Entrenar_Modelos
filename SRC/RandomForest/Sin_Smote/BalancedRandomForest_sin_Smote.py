@@ -642,6 +642,135 @@ def _plot_confusion_matrix(cm, title):
     plt.ylabel('Etiqueta Real')
     plt.xlabel('Predicción')
     plt.show()
+    
+def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
+    """
+    Genera la curva de aprendizaje para visualizar Bias y Varianza.
+    
+    La curva de aprendizaje es fundamental para diagnosticar problemas del modelo:
+    - Si TRAIN score es ALTO y VALIDATION score es BAJO → OVERFITTING (alta varianza)
+      Solución: regularización, menos features, más datos
+      
+    - Si TRAIN score es BAJO y VALIDATION score es BAJO → UNDERFITTING (alto bias)
+      Solución: modelo más complejo, más features, ajustar hiperparámetros
+      
+    - Si ambas curvas convergen a un buen score → modelo equilibrado
+    
+    Parámetros:
+    -----------
+    modelo : Pipeline entrenado
+    X : DataFrame de características (usamos training set)
+    y : Series de etiquetas (usamos training set)
+    cv : Objeto StratifiedKFold para validación cruzada
+    scoring_metric : Métrica a evaluar (f1, recall, precision, etc.)
+    """
+    print("\nGenerando Curvas de Aprendizaje...")
+    
+    # Usar learning_curve de sklearn para entrenar con tamaños de datos progresivos
+    # Esto permite ver cómo mejora el modelo a medida que aumentan los datos
+    train_sizes, train_scores, val_scores = learning_curve(
+        modelo, 
+        X, 
+        y, 
+        cv=cv,                                    # Validación cruzada estratificada
+        scoring=scoring_metric,                   # Métrica a medir (F2, recall, etc.)
+        n_jobs=-1,                                # Usar todos los núcleos CPU
+        train_sizes=np.linspace(0.1, 1.0, 10),   # 10 puntos: 10%, 20%, ..., 100%
+        shuffle=True                              # Mezclar datos antes de entrenar
+    )
+
+    # Calcular estadísticas para cada tamaño de entrenamiento
+    # train_scores tiene shape (10, 5) si usamos 5-fold CV
+    # Promediamos los 5 scores para obtener un solo valor por tamaño
+    train_mean = np.mean(train_scores, axis=1)    # Promedio de scores de entrenamiento
+    train_std = np.std(train_scores, axis=1)      # Desviación estándar (variabilidad)
+    val_mean = np.mean(val_scores, axis=1)        # Promedio de scores de validación
+    val_std = np.std(val_scores, axis=1)          # Desviación estándar
+
+    # Crear figura para el gráfico
+    plt.figure(figsize=(10, 6))
+    
+    # --- CURVA DE ENTRENAMIENTO ---
+    # Muestra cómo mejora el modelo con más datos de entrenamiento
+    # Normalmente, aumentar datos → mejora el score (la curva sube)
+    plt.plot(train_sizes, train_mean, 'o-', color="r", label="Score Entrenamiento")
+    # Área sombreada alrededor de la línea = ±1 desviación estándar
+    # Muestra la variabilidad entre los diferentes folds
+    plt.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.1, color="r")
+    
+    # --- CURVA DE VALIDACIÓN ---
+    # Muestra cómo generaliza el modelo a datos nuevos (no vistos en entrenamiento)
+    # Esta es la métrica MÁS importante (desempeño real esperado)
+    plt.plot(train_sizes, val_mean, 'o-', color="g", label="Score Validación (CV)")
+    # Área sombreada = variabilidad de la validación entre folds
+    plt.fill_between(train_sizes, val_mean - val_std, val_mean + val_std, alpha=0.1, color="g")
+
+    # Configuración del gráfico
+    plt.title(f"Curva de Aprendizaje (Bias vs Varianza) - {scoring_metric}")
+    plt.xlabel("Tamaño del Set de Entrenamiento (muestras)")
+    plt.ylabel("Score (0 a 1)")
+    plt.legend(loc="best")
+    plt.grid()
+    plt.show()
+
+    # ==== INTERPRETACIÓN AUTOMÁTICA DEL GAP TRAIN-VALIDACIÓN ====
+    # El gap final indica si hay overfitting:
+    # - Gap pequeño (< 0.05) → Buen balance entre bias y varianza
+    # - Gap grande (> 0.1) → Posible overfitting, el modelo memorizó entrenamiento
+    gap_final = train_mean[-1] - val_mean[-1]
+    print(f"Gap final entre Train y Validación: {gap_final:.4f}")
+    
+    if gap_final < 0.05:
+        print("✓ Gap pequeño: El modelo tiene buen balance (sin overfitting notable)")
+    elif gap_final < 0.10:
+        print("⚠ Gap moderado: Cierto overfitting, pero aceptable")
+    else:
+        print("✗ Gap grande: Overfitting significativo, considera regularización")
+
+    # ==== INTERPRETACIÓN AUTOMÁTICA DEL GAP TRAIN-VALIDACIÓN ====
+    # El "gap" (brecha) entre el score de entrenamiento y validación es un indicador
+    # clave del estado del modelo:
+    # - Gap pequeño (< 0.05) → El modelo generaliza bien, sin overfitting
+    # - Gap moderado (0.05-0.10) → Overfitting leve, aceptable en muchos casos
+    # - Gap grande (> 0.10) → Overfitting significativo, necesita regularización
+    
+    # Calcular la brecha final (diferencia entre último punto de Train y Validación)
+    # Un valor positivo significa que Train > Validación (típico en overfitting)
+    gap_final = train_mean[-1] - val_mean[-1]
+    
+    # El sesgo aproximado se estima como (1 - mejor_score_validación)
+    # Un sesgo alto significa que el modelo ni siquiera en entrenamiento logra buen score
+    # Esto indicaría que el modelo es demasiado simple (underfitting)
+    bias_final = 1 - val_mean[-1]
+    
+    # La varianza aproximada se asimila al gap train-validación
+    # Una varianza alta significa que el modelo memoriza entrenamiento pero falla en validación
+    # Esto indicaría que el modelo es demasiado complejo (overfitting)
+    varianza_final = gap_final
+
+    # --- IMPRIMIR MÉTRICAS DE DIAGNOSIS ---
+    print(f"Gap final entre Train y Validación: {gap_final:.4f}")
+    print(f"Sesgo (aprox): {bias_final:.4f}")
+    print(f"Varianza (aprox): {varianza_final:.4f}")
+
+    # --- DIAGNOSIS AUTOMÁTICA DEL ESTADO DEL MODELO ---
+    # Basada en el tamaño del gap, proporcionar recomendaciones al usuario
+    if gap_final < 0.05:
+        # Caso IDEAL: El modelo generaliza bien
+        # Train y Validación tienen scores similares → sin memorización
+        print("✓ Gap pequeño: El modelo tiene buen balance (sin overfitting notable)")
+    elif gap_final < 0.10:
+        # Caso ACEPTABLE: Hay cierto overfitting pero dentro de límites tolerables
+        # El modelo aprendió algunos patrones específicos del entrenamiento,
+        # pero aún generaliza razonablemente bien a datos nuevos
+        print("⚠ Gap moderado: Cierto overfitting, pero aceptable")
+    else:
+        # Caso PROBLEMÁTICO: Overfitting severo
+        # El modelo funciona muy bien en entrenamiento pero falla en validación
+        # Causas posibles: modelo muy complejo, pocos datos, sin regularización
+        # Soluciones: aumentar regularización L2, reducir profundidad de árboles,
+        # añadir más datos de entrenamiento, usar dropout
+        print("✗ Gap grande: Overfitting significativo, considera regularización")
 
 
 # ==============================================================================
@@ -682,6 +811,52 @@ def main():
     # PASO 6: Evaluación final (Reporte, CM, ROC, Errores) y Guardado
     paso_6_evaluacion_final_y_guardado(
         mejor_modelo, X_test, y_test, scaler, optimal_threshold, FEATURE_NAMES
+    )
+    
+     # ==========================================================================
+    # PASO 7 (BONUS): ANÁLISIS DE SESGO-VARIANZA (BIAS-VARIANCE TRADE-OFF)
+    # ==========================================================================
+    # Este paso NO es necesario para poner el modelo en producción,
+    # pero es MUY ÚTIL para diagnosticar problemas de desempeño.
+    #
+    # ¿Qué es la curva de aprendizaje?
+    # - Gráfico que muestra cómo mejora el modelo conforme aumentan los datos
+    # - Eje X: Tamaño del set de entrenamiento (10%, 20%, ..., 100%)
+    # - Eje Y: Score del modelo (F2-score en este caso)
+    #
+    # Interpretación:
+    # - Si ambas curvas (Train y Validación) están ALTAS y JUNTAS:
+    #   ✓ Buen modelo, buen balance entre sesgo y varianza
+    #
+    # - Si curva TRAIN está ALTA pero VALIDACIÓN está BAJA:
+    #   ✗ OVERFITTING: El modelo memorizó el entrenamiento pero no generaliza
+    #   Soluciones: Más regularización, menos features, más datos
+    #
+    # - Si ambas curvas están BAJAS:
+    #   ✗ UNDERFITTING: El modelo es demasiado simple para el problema
+    #   Soluciones: Modelo más complejo, más features, menos regularización
+    print("\n" + "="*70)
+    print("PASO 7 (BONUS): ANALIZANDO SESGO-VARIANZA (CURVA DE APRENDIZAJE)")
+    print("="*70)
+    print("Este gráfico muestra cómo mejora el modelo conforme aumentan los datos")
+    
+    # Preparar los objetos necesarios para la gráfica
+    # CV: Usar la misma validación cruzada que en el Paso 3 (5 folds estratificados)
+    cv_plot = StratifiedKFold(n_splits=N_SPLITS_CV, shuffle=True, random_state=RANDOM_STATE_SEED)
+    
+    # Scorer: Usar la misma métrica de optimización (F2-score)
+    # Esto asegura que la gráfica mida lo mismo que el modelo fue entrenado
+    f2_scorer = make_scorer(fbeta_score, beta=FBETA_BETA)
+
+    # Generar la gráfica de aprendizaje
+    # Nota: Usamos X_train e y_train para ver la curva de aprendizaje en datos de entrenamiento
+    # (es decir, cómo habría rendido con menos datos durante el entrenamiento)
+    paso_extra_graficar_bias_varianza(
+        modelo=mejor_modelo,       # Pipeline entrenado en Paso 3
+        X=X_train,                 # Características de entrenamiento
+        y=y_train,                 # Etiquetas de entrenamiento
+        cv=cv_plot,                # Validación cruzada estratificada
+        scoring_metric=f2_scorer   # F2-score (mismo que usó GridSearchCV)
     )
 
 

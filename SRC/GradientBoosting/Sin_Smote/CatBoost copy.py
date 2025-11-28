@@ -69,7 +69,7 @@ FEATURE_NAMES = [
 ]
 
 TEST_SIZE_RATIO = 0.4
-RANDOM_STATE_SEED = 42
+RANDOM_STATE_SEED = 22
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
@@ -373,6 +373,18 @@ def paso_1_cargar_y_preparar_datos(feature_names):
     X = pd.DataFrame(X_raw, columns=feature_names)
     X = X.applymap(lambda x: round(x, 4))
     y = pd.Series(y_raw, name="Etiqueta_Defecto")
+    
+    # 1. Contar duplicados
+    # Se considera duplicado si TODAS las columnas (las 32 features) son idénticas
+    num_duplicados = X.duplicated().sum()
+    
+    if num_duplicados > 0:
+        print(f"⚠ ¡ALERTA! Se encontraron {num_duplicados} muestras duplicadas exactas.")
+        
+        # 2. (Opcional) Ver cuáles son para curiosear
+        # Muestra las primeras 5 filas que son copias de otras
+        print("Ejemplo de duplicados:")
+        print(X[X.duplicated()].head())
 
     print("\n--- Resumen de Datos Cargados ---")
     print(f"Total de muestras: {len(X)}")
@@ -448,14 +460,14 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         
         # Paso 3: Modelo clasificador CatBoost (Gradient Boosting)
         # CatBoost es robusto con features categóricas y maneja el desbalance de clases bien
-        ('model', CatBoostClassifier(
+         ('model', CatBoostClassifier(
             loss_function="Logloss",              # Función de pérdida (logarítmica binaria)
             eval_metric="Recall",                 # Métrica a monitorear durante entrenamiento
-            depth= [1,2],                              # Profundidad inicial de los árboles
-            learning_rate=[0.05, 0.1],                   # Tasa de aprendizaje inicial
+            depth=4,                              # Profundidad inicial de los árboles
+            learning_rate=0.05,                   # Tasa de aprendizaje inicial
             bootstrap_type='Bernoulli',           # Tipo de bootstrapping (necesario para subsample)
-            iterations=[50,100,150],                       # Número máximo de iteraciones (árboles)
-            l2_leaf_reg=[10,30,50],                        # Regularización L2 (previene overfitting)
+            iterations=500,                       # Número máximo de iteraciones (árboles)
+            l2_leaf_reg=8,                        # Regularización L2 (previene overfitting)
             random_seed=random_state,             # Semilla para reproducibilidad
             subsample=0.7,                        # Porcentaje de muestras para cada iteración
             od_type="Iter",                       # Tipo de detección de overfitting
@@ -479,8 +491,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__min_data_in_leaf': [1, 5],                 # Número mínimo de muestras en hojas (previene overfitting)
         
         # Parámetro del selector de características (RFE)
-        'selector__n_features_to_select': [3,5,8],    # Número final de características a seleccionar
-        "model__iterations": [50, 100, 150]
+        'selector__n_features_to_select': [15,20,25],    # Número final de características a seleccionar
     }
     
     # Calcular número total de combinaciones a evaluar

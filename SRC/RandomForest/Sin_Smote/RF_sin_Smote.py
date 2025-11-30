@@ -69,7 +69,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.68
+PRECISION_MINIMA = 0.7
 
 
 # ==============================================================================
@@ -399,7 +399,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__min_samples_leaf': [3, 5, 10],    # > 1 fuerza a generalizar
         'model__min_samples_split': [2, 5, 10],
         'model__max_features': ['sqrt', 'log2'],
-        'selector__estimator__max_features': [15 ,20 ,25]              # --- Parámetros del Selector ---#
+        'selector__estimator__max_features': [15,20,25]              # --- Parámetros del Selector ---#
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_rf.values()])

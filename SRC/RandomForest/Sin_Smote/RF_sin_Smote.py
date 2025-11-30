@@ -37,6 +37,7 @@ from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
+from sklearn.model_selection import learning_curve
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
@@ -182,10 +183,11 @@ def extraer_features_fila_por_fila(new_df):
         t_soldadura = (np.linspace(0, ts2, ns + 1)).tolist()
 
         if len(t_soldadura) != len(valores_resistencia):
-            min_len = min(len(t_soldadura), len(valores_resistencia))
+            min_len = min(len(t_soldadura), len(valores_resistencia),len(valores_corriente), len(valores_voltaje))
             t_soldadura = t_soldadura[:min_len]
             valores_resistencia = valores_resistencia[:min_len]
             valores_voltaje = valores_voltaje[:min_len]
+            valores_corriente = valores_corriente[:min_len]
         if not t_soldadura:
             print(f"Advertencia: Fila {i} sin datos de series temporales. Saltando.")
             continue
@@ -202,12 +204,36 @@ def extraer_features_fila_por_fila(new_df):
         t_min = np.argmin(valores_resistencia[:-1])
         t_soldadura_min = t_soldadura[t_min]
         
-        # --- 4. Parámetros escalares ---
-        kAI2 = new_df.loc[i, "KAI2"]
-        f = new_df.loc[i, "Fuerza"]
+        # ==============================================================================
+        # CÁLCULO DE ENERGÍA DIRECTO (P = V * I) - MÁS ROBUSTO
+        # ==============================================================================
         
-        # --- 5. Cálculo de Features (Lógica original) ---
-        q = np.nan_to_num(((((kAI2 * 1000.0) ** 2) * (ts2 / 1000.0)) / (f * 10.0)), nan=0)
+        # 1. Convertir a Numpy
+        arr_v = np.array(valores_voltaje)       # Voltios (crudo)
+        arr_i_kA = np.array(valores_corriente)  # kA (crudo)
+        arr_t_ms = np.array(t_soldadura)        # ms
+        
+        # --- BLOQUE DE SEGURIDAD DE TAMAÑOS ---
+        min_len = min(len(arr_v), len(arr_i_kA), len(arr_t_ms))
+        arr_v = arr_v[:min_len]
+        arr_i_kA = arr_i_kA[:min_len]
+        arr_t_ms = arr_t_ms[:min_len]
+        # --------------------------------------
+
+        # 2. Unidades SI
+        arr_i_amp = arr_i_kA * 10   # kA -> Amperios
+        arr_t_sec = arr_t_ms / 1000.0   # ms -> Segundos
+        arra_volts= arr_v/100.0
+
+        # 3. Potencia Instantánea (Watts)
+        # Operación vectorizada directa, sin calcular resistencia intermedia
+        potencia_watts = arra_volts * arr_i_amp
+
+        # 4. Energía Total (Julios)
+        q_joules = np.trapz(potencia_watts, x=arr_t_sec)
+        
+        q = np.nan_to_num(q_joules, nan=0)
+        
         area_bajo_curva = np.nan_to_num(np.trapz(valores_resistencia, t_soldadura), nan=0)
         resistencia_ultima = valores_resistencia[-2]
         try:
@@ -296,7 +322,6 @@ def extraer_features_fila_por_fila(new_df):
         
     print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)
-
 
 # ==============================================================================
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING

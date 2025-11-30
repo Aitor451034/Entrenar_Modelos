@@ -37,6 +37,7 @@ from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
     precision_score, recall_score, roc_curve, roc_auc_score
 )
+from sklearn.model_selection import learning_curve
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
@@ -205,8 +206,36 @@ def extraer_features_fila_por_fila(new_df):
         kAI2 = new_df.loc[i, "KAI2"]
         f = new_df.loc[i, "Fuerza"]
         
-        # --- 5. Cálculo de Features (Lógica original) ---
-        q = np.nan_to_num(((((kAI2 * 1000.0) ** 2) * (ts2 / 1000.0)) / (f * 10.0)), nan=0)
+# ==============================================================================
+        # CÁLCULO DE ENERGÍA DIRECTO (P = V * I) - MÁS ROBUSTO
+        # ==============================================================================
+        
+        # 1. Convertir a Numpy
+        arr_v = np.array(valores_voltaje)       # Voltios (crudo)
+        arr_i_kA = np.array(valores_corriente)  # kA (crudo)
+        arr_t_ms = np.array(t_soldadura)        # ms
+        
+        # --- BLOQUE DE SEGURIDAD DE TAMAÑOS ---
+        min_len = min(len(arr_v), len(arr_i_kA), len(arr_t_ms))
+        arr_v = arr_v[:min_len]
+        arr_i_kA = arr_i_kA[:min_len]
+        arr_t_ms = arr_t_ms[:min_len]
+        # --------------------------------------
+
+        # 2. Unidades SI
+        arr_i_amp = arr_i_kA * 10   # kA -> Amperios
+        arr_t_sec = arr_t_ms / 1000.0   # ms -> Segundos
+        arra_volts= arr_v/100.0
+
+        # 3. Potencia Instantánea (Watts)
+        # Operación vectorizada directa, sin calcular resistencia intermedia
+        potencia_watts = arra_volts * arr_i_amp
+
+        # 4. Energía Total (Julios)
+        q_joules = np.trapz(potencia_watts, x=arr_t_sec)
+        
+        q = np.nan_to_num(q_joules, nan=0)
+
         area_bajo_curva = np.nan_to_num(np.trapz(valores_resistencia, t_soldadura), nan=0)
         resistencia_ultima = valores_resistencia[-2]
         try:
@@ -300,6 +329,32 @@ def extraer_features_fila_por_fila(new_df):
 # ==============================================================================
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
 # ==============================================================================
+
+def graficar_distribucion_energia(X, y):
+    """Diagnóstico: Grafica histograma de la Energía (q) para ver separación de clases."""
+    print("\n--- Generando Gráfico de Diagnóstico de Energía (q) ---")
+    plt.figure(figsize=(10, 6))
+    
+    # Intentamos encontrar la columna 'q' por nombre si X es DataFrame, o índice 30
+    try:
+        if isinstance(X, pd.DataFrame):
+            col_q = X['q']
+        else:
+            col_q = X[:, 30] 
+        
+        q_buenos = col_q[y == 0]
+        q_defectos = col_q[y == 1]
+        
+        sns.histplot(q_buenos, color='green', label='OK (Sin Defecto)', kde=True, element="step")
+        sns.histplot(q_defectos, color='red', label='No OK (Defecto)', kde=True, element="step")
+        
+        plt.title('DIAGNÓSTICO: Distribución de Energía Real (Joules) por Clase')
+        plt.xlabel('Energía (q) - Joules Calculados con V*I')
+        plt.legend()
+        plt.show()
+        print("Gráfico generado. Si las curvas están muy separadas, es NORMAL tener un score alto.")
+    except Exception as e:
+        print(f"No se pudo generar el gráfico de energía: {e}")
 
 def paso_1_cargar_y_preparar_datos(feature_names):
     """Orquesta la carga de datos y la creación de los DataFrames X e y."""
@@ -778,6 +833,7 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
 # ==============================================================================
 
 def main():
+
     """
     Función principal que orquesta todo el pipeline de ML.
     """
@@ -785,6 +841,11 @@ def main():
     X, y = paso_1_cargar_y_preparar_datos(FEATURE_NAMES)
     if X is None:
         return
+
+    # --- NUEVO: DIAGNÓSTICO DE ENERGÍA ---
+    # Esto te dirá si el problema es "demasiado fácil" físicamente
+    graficar_distribucion_energia(X, y)
+    # -------------------------------------
 
     # PASO 2: Dividir y escalar los datos
     X_train, X_test, y_train, y_test, scaler = paso_2_escalar_y_dividir_datos(

@@ -52,7 +52,7 @@ FEATURE_NAMES = [
 ]
 
 # Parámetros del experimento
-TEST_SIZE_RATIO = 0.30      # 30% para test final
+TEST_SIZE_RATIO = 0.40      # 40% para test final
 RANDOM_STATE_SEED = 42      # Semilla para reproducibilidad
 N_SPLITS_CV = 5             # Número de carpetas para validación cruzada (ESTA FALTABA)
 FBETA_BETA = 2              # Prioridad Recall (F2-Score)

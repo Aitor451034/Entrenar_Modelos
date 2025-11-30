@@ -1,11 +1,7 @@
 """
-Script de Detección de Defectos en Soldadura (RSW)
-Arquitectura: Procesos Gaussianos de Clasificación (GPC) con ARD
-Estilo de Evaluación: Estandarizado (igual al script CatBoost)
-
-Cambios principales:
-- Núcleo matemático: GPC + Kernel Matern (ARD).
-- Evaluación: Pipeline de reportes, gráficos y análisis de errores importado de CatBoost.
+Script de Detección de Defectos en Soldadura (RSW) - VERSIÓN ULTRAROBUSTA
+Arquitectura: SVM (Kernel RBF) con Selección Secuencial (SFS)
+Evaluación: Estándar Robusto (Gráficos, Umbrales, Análisis de Errores y Bias-Varianza)
 """
 
 # ==============================================================================
@@ -26,19 +22,19 @@ from scipy.stats import skew, kurtosis
 
 # --- Scikit-learn Core ---
 from sklearn.model_selection import (
-    train_test_split, GridSearchCV, cross_val_predict, RepeatedStratifiedKFold, StratifiedKFold
+    train_test_split, GridSearchCV, cross_val_predict, RepeatedStratifiedKFold, StratifiedKFold, learning_curve
 )
-from sklearn.model_selection import learning_curve
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     fbeta_score, make_scorer, classification_report, confusion_matrix,
-    precision_score, recall_score, roc_curve, roc_auc_score, auc
+    precision_score, recall_score, roc_auc_score, roc_curve, auc
 )
 
-# --- GPC y Kernels ---
-from sklearn.gaussian_process import GaussianProcessClassifier
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel
+# --- SVM y Selección Avanzada ---
+from sklearn.svm import SVC
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.inspection import permutation_importance # Necesario para interpretar SVM RBF
 
 # ==============================================================================
 # 2. CONFIGURACIÓN
@@ -55,18 +51,15 @@ FEATURE_NAMES = [
     "num_picos", "num_valles", "q", "m_min_cuadrados"
 ]
 
-TEST_SIZE_RATIO = 0.40  # Small Data Strategy
-RANDOM_STATE_SEED = 42
-N_SPLITS_CV = 5
-N_REPEATS_CV = 5        
-FBETA_BETA = 2          
-PRECISION_MINIMA = 0.70 # Restricción operativa
+TEST_SIZE_RATIO = 0.40      
+RANDOM_STATE_SEED = 42      
+N_SPLITS_CV = 5             
+FBETA_BETA = 2              
+PRECISION_MINIMA = 0.75     
 
 # ==============================================================================
 # 3. FUNCIONES DE PREPROCESAMIENTO (INVARIANTES)
 # ==============================================================================
-# (Se mantienen idénticas para asegurar consistencia en la carga de datos)
-
 def leer_archivo():
     print("Selecciona el archivo CSV que contiene los datos...")
     root = tk.Tk()
@@ -110,8 +103,7 @@ def preprocesar_dataframe_inicial(df):
     new_df.index = range(1, len(new_df) + 1)
     for col in df.columns:
         if df[col].dtype == object:
-            try:
-                df[col] = df[col].str.replace(',', '.', regex=False).astype(float)
+            try: df[col] = df[col].str.replace(',', '.', regex=False).astype(float)
             except: pass
     return new_df
 
@@ -154,12 +146,11 @@ def extraer_features_fila_por_fila(new_df):
         t_min = np.argmin(valores_resistencia[:-1])
         t_soldadura_min = t_soldadura[t_min]
         
-        # Energía
+        # Energía y Features
         arr_v = np.array(valores_voltaje) / 100.0
         arr_i_amp = np.array(valores_corriente) * 10
         arr_t_sec = np.array(t_soldadura) / 1000.0
-        potencia_watts = arr_v * arr_i_amp
-        q = np.nan_to_num(np.trapz(potencia_watts, x=arr_t_sec), nan=0)
+        q = np.nan_to_num(np.trapz(arr_v * arr_i_amp, x=arr_t_sec), nan=0)
         
         area_bajo_curva = np.nan_to_num(np.trapz(valores_resistencia, t_soldadura), nan=0)
         resistencia_ultima = valores_resistencia[-2]
@@ -230,12 +221,12 @@ def extraer_features_fila_por_fila(new_df):
         ])
         y_calculado.append(int(new_df.loc[i, "Etiqueta datos"]))
         
+    print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)
 
 # ==============================================================================
-# 4. FUNCIONES DE UTILIDAD Y GRÁFICOS COMPARTIDOS
+# 4. FUNCIONES DE UTILERÍA Y GRÁFICOS
 # ==============================================================================
-
 def graficar_distribucion_energia(X, y):
     print("\n--- Generando Gráfico de Diagnóstico de Energía (q) ---")
     plt.figure(figsize=(10, 6))
@@ -250,22 +241,20 @@ def graficar_distribucion_energia(X, y):
         print(f"No se pudo generar el gráfico de energía: {e}")
 
 def _plot_confusion_matrix(cm, title):
-    """Auxiliar para graficar matriz de confusión estilo CatBoost."""
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(
-        pd.DataFrame(cm), annot=True, cmap="YlGnBu", fmt='g', cbar=False,
-        xticklabels=["Pred Sin Defecto", "Pred Pegado"],
-        yticklabels=["Real Sin Defecto", "Real Pegado"]
+        cm, annot=True, fmt='d', cmap='Blues', cbar=False,
+        xticklabels=["Pred: OK", "Pred: Defecto"],
+        yticklabels=["Real: OK", "Real: Defecto"]
     )
-    ax.xaxis.set_label_position("bottom")
     plt.title(title)
-    plt.ylabel('Etiqueta Real')
-    plt.xlabel('Predicción')
+    plt.ylabel('Realidad')
+    plt.xlabel('Predicción del Modelo')
     plt.tight_layout()
     plt.show()
 
 # ==============================================================================
-# 5. PIPELINE DE APRENDIZAJE Y EVALUACIÓN
+# 5. PIPELINE DE APRENDIZAJE ROBUSTO
 # ==============================================================================
 
 def paso_1_cargar_y_preparar_datos(feature_names):
@@ -275,7 +264,7 @@ def paso_1_cargar_y_preparar_datos(feature_names):
         df_pre = preprocesar_dataframe_inicial(df_raw)
         X_arr, y_arr = extraer_features_fila_por_fila(df_pre)
     except NameError:
-        print("Error en funciones de extracción.")
+        print("Error: Funciones de extracción no definidas.")
         return None, None
 
     if X_arr.size == 0: return None, None
@@ -285,213 +274,204 @@ def paso_1_cargar_y_preparar_datos(feature_names):
     return X, y
 
 def paso_2_dividir_datos(X, y):
-    return train_test_split(X, y, test_size=TEST_SIZE_RATIO, random_state=RANDOM_STATE_SEED, stratify=y)
+    return train_test_split(
+        X, y, test_size=TEST_SIZE_RATIO, 
+        random_state=RANDOM_STATE_SEED, stratify=y
+    )
 
-def paso_3_entrenar_gpc_ard(X_train, y_train):
+def paso_3_seleccion_secuencial_sfs(X_train, y_train, feature_names):
+    """
+    Selección secuencial (SFS).
+    """
     print("\n" + "="*60)
-    print("--- PASO 3: ENTRENAMIENTO PROCESO GAUSSIANO (GPC + ARD) ---")
+    print("--- PASO 3: SELECCIÓN AUTOMÁTICA (SFS) ---")
     print("="*60)
-    
-    dims = X_train.shape[1]
-    kernel_matern = 1.0 * Matern(length_scale=np.ones(dims), length_scale_bounds=(1e-2, 1e2), nu=1.5)
-    kernel_noise = WhiteKernel(noise_level=1e-2, noise_level_bounds=(1e-5, 1e-1))
-    kernel_total = kernel_matern + kernel_noise
 
+    svm_selector = Pipeline([
+        ('scaler', RobustScaler()),
+        ('svm', SVC(kernel='rbf', C=50, gamma='auto', class_weight='balanced', random_state=RANDOM_STATE_SEED))
+    ])
+    
+    sfs = SequentialFeatureSelector(
+        svm_selector,
+        n_features_to_select="auto", 
+        tol=0.005,      
+        direction='forward',
+        scoring=make_scorer(fbeta_score, beta=FBETA_BETA), 
+        cv=StratifiedKFold(n_splits=5), 
+        n_jobs=-1
+    )
+    
+    start_time = time.time()
+    sfs.fit(X_train, y_train)
+    elapsed_time = time.time() - start_time
+
+    indices_vip = np.where(sfs.get_support())[0]
+    features_vip = np.array(feature_names)[indices_vip]
+    
+    print(f"\nSelección completada en {elapsed_time:.2f} segundos.")
+    print(f"✅ Variables seleccionadas ({len(features_vip)}): {list(features_vip)}")
+    
+    return features_vip, indices_vip
+
+def paso_4_visualizar_importancia_sfs_permutation(modelo, X, y, feature_names):
+    """
+    MODIFICADO: Genera el gráfico de barras horizontales usando Permutation Importance.
+    SVM con RBF no tiene 'coef_', por lo que usamos permutación para ver qué variable 
+    afecta más al modelo si la alteramos.
+    """
+    print("\n--- Generando Gráfico de Importancia (Permutation Importance) ---")
+    
+    # Calculamos la importancia permutando características en el set de validación
+    # Esto nos dice: "¿Cuánto cae el Score si mezclo aleatoriamente esta columna?"
+    r = permutation_importance(
+        modelo, X, y,
+        n_repeats=10,
+        random_state=RANDOM_STATE_SEED,
+        scoring=make_scorer(fbeta_score, beta=FBETA_BETA),
+        n_jobs=-1
+    )
+    
+    importancias = r.importances_mean
+    sorted_idx = importancias.argsort()
+
+    # Crear DataFrame para visualización
+    df_imp = pd.DataFrame({
+        'Feature': np.array(feature_names)[sorted_idx],
+        'Importance': importancias[sorted_idx]
+    })
+    
+    # Gráfico estilo CatBoost (Barras horizontales)
+    plt.figure(figsize=(10, 8))
+    plt.barh(df_imp['Feature'], df_imp['Importance'], color='teal')
+    plt.xlabel("Importancia de Permutación (Caída en F2-Score)")
+    plt.title("Importancia de Variables (SVM RBF - Permutación)")
+    plt.tight_layout()
+    plt.show()
+
+def paso_5_entrenar_final_y_optimizar_umbral(X_train, y_train, n_splits, precision_minima):
+    """
+    Entrena el modelo final y optimiza el umbral con gráficas P/R vs Threshold.
+    """
+    print(f"\n--- PASO 5: Entrenamiento Final y Optimización de Umbral ---")
+    
+    # 1. Pipeline Final
     pipeline = Pipeline([
-        ('scaler', StandardScaler()),
-        ('gpc', GaussianProcessClassifier(kernel=kernel_total, n_restarts_optimizer=10, random_state=RANDOM_STATE_SEED, n_jobs=-1))
+        ('scaler', RobustScaler()), 
+        ('svm', SVC(kernel='rbf', probability=True, class_weight='balanced', random_state=RANDOM_STATE_SEED))
     ])
 
-    rskf = RepeatedStratifiedKFold(n_splits=N_SPLITS_CV, n_repeats=N_REPEATS_CV, random_state=RANDOM_STATE_SEED)
+    # 2. GridSearch Fino
+    param_grid = {
+        'svm__C': [1, 10, 50, 100, 500],
+        'svm__gamma': ['scale', 0.1, 0.01]
+    }
+    
+    rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=RANDOM_STATE_SEED)
     f2_scorer = make_scorer(fbeta_score, beta=FBETA_BETA)
 
-    print("Optimizando LML...")
-    start_time = time.time()
-    search = GridSearchCV(pipeline, {}, cv=rskf, scoring=f2_scorer, n_jobs=-1, verbose=1)
+    search = GridSearchCV(pipeline, param_grid, cv=rskf, scoring=f2_scorer, n_jobs=-1, verbose=1)
     search.fit(X_train, y_train)
-    elapsed = time.time() - start_time
+    mejor_modelo = search.best_estimator_
     
-    print(f"Entrenamiento completado en {elapsed:.2f}s. Mejor F2: {search.best_score_:.4f}")
-    return search.best_estimator_
-
-def paso_4_analisis_relevancia_ard(modelo, feature_names):
-    """
-    MODIFICADO: Usa la matemática de ARD (1/length_scale) pero grafica 
-    con el estilo visual del script de CatBoost (barras horizontales limpias).
-    """
-    print("\n--- Análisis de Relevancia Automática (ARD) ---")
+    print(f"Mejor CV Score: {search.best_score_:.4f}")
     
-    gpc_model = modelo.named_steps['gpc']
-    kernel_opt = gpc_model.kernel_
-    length_scales = None
-    
-    # Navegación por la estructura del Kernel
-    try: length_scales = kernel_opt.k1.k2.length_scale
-    except: 
-        try: length_scales = kernel_opt.length_scale
-        except: 
-            print("No se pudo extraer estructura kernel ARD.")
-            return pd.DataFrame() # Retorno vacío seguro
-
-    # Importancia = Inversa de la escala
-    relevancia = 1.0 / length_scales
-    relevancia_norm = 100 * (relevancia / np.max(relevancia))
-
-    df_ard = pd.DataFrame({
-        'Feature': feature_names,
-        'Relevancia_ARD': relevancia_norm
-    }).sort_values(by='Relevancia_ARD', ascending=False)
-
-    print("Top 10 Variables más importantes (ARD):")
-    print(df_ard.head(10))
-
-    # --- ESTILO GRÁFICO TIPO CATBOOST ---
-    plt.figure(figsize=(10, 8))
-    # Invertimos el orden para que la más importante quede arriba en barh
-    df_plot = df_ard.sort_values(by='Relevancia_ARD', ascending=True)
-    
-    plt.barh(df_plot['Feature'], df_plot['Relevancia_ARD'], color='teal')
-    plt.axvline(x=10.0, color='red', linestyle='--', label='Corte Sugerido (10%)')
-    
-    plt.title('Importancia de Variables (ARD - Proceso Gaussiano)')
-    plt.xlabel('Relevancia Normalizada (1/Length_Scale)')
-    plt.ylabel('Variable')
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    
-    return df_ard
-
-def paso_5_optimizar_umbral_estilo_catboost(modelo, X_train, y_train, n_splits=5):
-    """
-    Versión importada del script CatBoost.
-    Grafica Precision/Recall vs Threshold y busca Máx Recall sujeto a Precisión mínima.
-    """
-    print(f"\n--- Calibración de Umbral (Restricción: Precisión >= {PRECISION_MINIMA}) ---")
-    
+    # 3. Optimización de Umbral (Estilo CatBoost)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE_SEED)
-    
-    # Probabilidades OOF (Out-Of-Fold)
-    y_probas = cross_val_predict(modelo, X_train, y_train, cv=skf, method='predict_proba', n_jobs=-1)[:, 1]
+    y_probas_cv = cross_val_predict(mejor_modelo, X_train, y_train, cv=skf, method='predict_proba', n_jobs=-1)[:, 1]
 
     umbrales = np.linspace(0.01, 0.99, 1000)
-    best_thresh = 0.5
-    best_recall = 0.0
-    final_precision = 0.0
-    
-    precision_list, recall_list = [], []
-    found_feasible = False
-    
-    for t in umbrales:
-        preds = (y_probas >= t).astype(int)
-        p = precision_score(y_train, preds, zero_division=0)
-        r = recall_score(y_train, preds, zero_division=0)
-        precision_list.append(p)
-        recall_list.append(r)
-        
-        if p >= PRECISION_MINIMA:
-            found_feasible = True
-            if r > best_recall:
-                best_recall = r
-                best_thresh = t
-                final_precision = p
-            elif r == best_recall:
-                best_thresh = min(best_thresh, t) # Preferir umbral más bajo si recall es igual
+    best_recall = -1
+    optimal_threshold = 0.5
+    best_precision = 0
 
-    if not found_feasible:
-        print("ADVERTENCIA: Ningún umbral cumple la restricción. Usando 0.5.")
-        best_thresh = 0.5
+    precision_vals, recall_vals = [], []
+
+    for thresh in umbrales:
+        y_pred = (y_probas_cv >= thresh).astype(int)
+        prec = precision_score(y_train, y_pred, zero_division=0)
+        rec = recall_score(y_train, y_pred, zero_division=0)
+        precision_vals.append(prec)
+        recall_vals.append(rec)
+
+        if prec >= precision_minima:
+            if rec > best_recall:
+                best_recall = rec
+                optimal_threshold = thresh
+                best_precision = prec
+            elif rec == best_recall:
+                optimal_threshold = min(optimal_threshold, thresh)
+
+    if best_recall == -1:
+        print(f"⚠ Ningún umbral cumple Precision >= {precision_minima}. Usando 0.5.")
+        optimal_threshold = 0.5
     else:
-        print(f"Umbral Óptimo Encontrado: {best_thresh:.4f}")
-        print(f"Metrics (CV): Recall={best_recall:.4f} | Precision={final_precision:.4f}")
+        print(f"✅ Umbral Óptimo: {optimal_threshold:.4f} (Recall: {best_recall:.4f}, Prec: {best_precision:.4f})")
 
-    # --- GRÁFICO ESTILO CATBOOST ---
-    plt.figure(figsize=(12, 7))
-    plt.plot(umbrales, precision_list, label='Precision', color='blue', linewidth=2)
-    plt.plot(umbrales, recall_list, label='Recall', color='green', linewidth=2)
-    plt.axvline(best_thresh, color='red', linestyle='--', label=f'Optimum ({best_thresh:.2f})')
-    plt.axhline(PRECISION_MINIMA, color='gray', linestyle=':', label=f'Min Precision ({PRECISION_MINIMA})')
-    
-    plt.title('Precision y Recall vs. Umbral de Decisión (GPC)', fontsize=14)
-    plt.xlabel('Probabilidad de Corte')
-    plt.ylabel('Score')
+    # Gráfico Precision/Recall vs Umbral
+    plt.figure(figsize=(10, 5))
+    plt.plot(umbrales, precision_vals, label='Precision', color='blue')
+    plt.plot(umbrales, recall_vals, label='Recall', color='green')
+    plt.axvline(optimal_threshold, color='red', linestyle='--', label=f'Óptimo: {optimal_threshold:.3f}')
+    plt.axhline(precision_minima, color='gray', linestyle=':', label='Min Precision')
+    plt.title('Evolución de Precision y Recall según Umbral (CV)')
+    plt.xlabel('Umbral')
     plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-    
-    return best_thresh
-
-def paso_6_evaluacion_final_robusta(modelo, X_test, y_test, umbral, feature_names):
-    """
-    Evaluación completa importada del script CatBoost:
-    - Reporte Clasificación
-    - Matriz Confusión
-    - Curva ROC
-    - Análisis detallado de Falsos Negativos/Positivos
-    - Guardado de artefactos
-    """
-    print("\n" + "="*70)
-    print("PASO 6: EVALUACIÓN FINAL (ESTILO CATBOOST) Y GUARDADO")
-    print("="*70)
-    
-    # 1. Predicciones
-    probs_test = modelo.predict_proba(X_test)[:, 1]
-    preds_test = (probs_test >= umbral).astype(int)
-    
-    # 2. Reporte
-    print("\nReporte de Clasificación (Test Set):")
-    print(classification_report(y_test, preds_test, target_names=["OK", "DEFECTO"]))
-    
-    # 3. Matriz Confusión Visual
-    cm = confusion_matrix(y_test, preds_test)
-    _plot_confusion_matrix(cm, f"Matriz Confusión GPC (Umbral {umbral:.3f})")
-    
-    # 4. Curva ROC
-    fpr, tpr, _ = roc_curve(y_test, probs_test)
-    roc_auc = auc(fpr, tpr)
-    
-    plt.figure()
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'GPC ARD (AUC = {roc_auc:.4f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlabel('Tasa de Falsos Positivos')
-    plt.ylabel('Tasa de Verdaderos Positivos')
-    plt.title('Curva ROC (Test Set)')
-    plt.legend(loc="lower right")
     plt.grid(alpha=0.3)
     plt.show()
+
+    return mejor_modelo, optimal_threshold
+
+def paso_6_evaluacion_final_robusta(mejor_modelo, X_test, y_test, optimal_threshold, feature_names):
+    """
+    Evaluación completa (Reporte, ROC, Matriz, Análisis de Errores).
+    """
+    print("\n--- PASO 6: Evaluación Final en Test Set ---")
     
-    # 5. ANÁLISIS DE ERRORES (CRÍTICO)
-    print("\n--- ANÁLISIS DE ERRORES DETALLADO ---")
-    # Reset index para alinear con y_test si es necesario, aunque X_test conserva índices
-    df_analisis = pd.DataFrame(y_test)
-    df_analisis['Probabilidad_Defecto'] = probs_test
-    df_analisis['Prediccion_Binaria'] = preds_test
+    # Predicciones
+    y_probas_test = mejor_modelo.predict_proba(X_test)[:, 1]
+    preds_test_optimas = (y_probas_test >= optimal_threshold).astype(int)
+
+    # Reporte
+    print(f"\nReporte de Clasificación (Umbral {optimal_threshold:.4f}):")
+    print(classification_report(y_test, preds_test_optimas, target_names=['Sin Defecto', 'Pegado']))
+
+    # Curva ROC
+    fpr, tpr, _ = roc_curve(y_test, y_probas_test)
+    auc_test = auc(fpr, tpr)
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f'AUC Test = {auc_test:.4f}', color='purple', lw=2)
+    plt.plot([0, 1], [0, 1], 'k--', lw=1)
+    plt.title('Curva ROC - Test Set')
+    plt.legend(loc='lower right')
+    plt.grid(alpha=0.3)
+    plt.show()
+
+    # Matriz Confusión
+    cm = confusion_matrix(y_test, preds_test_optimas)
+    _plot_confusion_matrix(cm, f"Matriz Test (Umbral {optimal_threshold:.4f})")
+
+    # Análisis de Errores
+    print("\n--- Análisis de Errores Detallado ---")
+    df_analisis = pd.DataFrame({'Real': y_test, 'Probabilidad': y_probas_test, 'Prediccion': preds_test_optimas})
     
     # Falsos Negativos
-    fn_mask = (df_analisis['Etiqueta_Defecto'] == 1) & (df_analisis['Prediccion_Binaria'] == 0)
-    fns = df_analisis[fn_mask]
-    print(f"\n[Falsos Negativos] Defectos NO detectados: {len(fns)}")
-    if len(fns) > 0:
-        print(fns[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
-        print(f"Promedio Probabilidad en FN: {fns['Probabilidad_Defecto'].mean():.4f}")
-    else:
-        print("✓ ¡Excelente! Cero Falsos Negativos.")
+    fn = df_analisis[(df_analisis['Real'] == 1) & (df_analisis['Prediccion'] == 0)]
+    print(f"\n[Falsos Negativos] Defectos NO detectados: {len(fn)}")
+    if not fn.empty: print(fn.head(10).to_string())
 
     # Falsos Positivos
-    fp_mask = (df_analisis['Etiqueta_Defecto'] == 0) & (df_analisis['Prediccion_Binaria'] == 1)
-    fps = df_analisis[fp_mask]
-    print(f"\n[Falsos Positivos] Falsas Alarmas: {len(fps)}")
-    if len(fps) > 0:
-        print(fps[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
-    
-    # 6. Guardado
+    fp = df_analisis[(df_analisis['Real'] == 0) & (df_analisis['Prediccion'] == 1)]
+    print(f"\n[Falsos Positivos] Falsas Alarmas: {len(fp)}")
+    if not fp.empty: print(fp.head(10).to_string())
+
+    # Guardado
     artefactos = {
-        "modelo_pipeline": modelo,
-        "umbral_optimo": umbral,
-        "feature_names_finales": feature_names
+        "pipeline_completo": mejor_modelo,
+        "umbral": optimal_threshold,
+        "feature_names": feature_names
     }
-    with open('modelo_GPC_ARD_soldadura_ROBUSTO.pkl', 'wb') as f:
+    with open('modelo_svm_sfs_optimizado.pkl', 'wb') as f:
         pickle.dump(artefactos, f)
     print("\nModelo guardado exitosamente.")
 
@@ -522,21 +502,14 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
 
     gap = train_mean[-1] - val_mean[-1]
     print(f"Gap Final: {gap:.4f}")
-    if gap < 0.05: print("✓ Balance Correcto.")
-    elif gap < 0.10: print("⚠ Overfitting Moderado.")
-    else: print("✗ Overfitting Alto.")
 
 # ==============================================================================
 # MAIN
 # ==============================================================================
-
 def main():
     # 1. Carga
-    try:
-        X, y = paso_1_cargar_y_preparar_datos(FEATURE_NAMES)
-    except NameError:
-        print("Define las funciones de extracción primero.")
-        return
+    try: X, y = paso_1_cargar_y_preparar_datos(FEATURE_NAMES)
+    except NameError: return
     if X is None: return
 
     # Diagnóstico Energía
@@ -545,51 +518,29 @@ def main():
     # 2. División
     X_train, X_test, y_train, y_test = paso_2_dividir_datos(X, y)
     
-    # ---------------------------------------------------------
-    # RONDA 1: DESCUBRIMIENTO (ARD)
-    # ---------------------------------------------------------
-    print("\n🔴 RONDA 1: Entrenando con TODAS las variables...")
-    modelo_exploratorio = paso_3_entrenar_gpc_ard(X_train, y_train)
+    # 3. Selección SFS
+    features_vip, indices_vip = paso_3_seleccion_secuencial_sfs(X_train, y_train, FEATURE_NAMES)
     
-    # Análisis y Selección
-    df_ard = paso_4_analisis_relevancia_ard(modelo_exploratorio, FEATURE_NAMES)
-    
-    # Filtrar Features (>10% importancia relativa)
-    # Nota: Si df_ard está vacío, usar todas.
-    if not df_ard.empty:
-        features_vip = df_ard[df_ard['Relevancia_ARD'] >= 10.0]['Feature'].values
-    else:
-        features_vip = np.array(FEATURE_NAMES)
-        
-    print(f"\n✅ SELECCIONADAS {len(features_vip)} VARIABLES CRÍTICAS:")
-    print(list(features_vip))
-    
-    # Reducir datasets
-    X_train_vip = X_train[features_vip]
-    X_test_vip  = X_test[features_vip]
+    X_train_vip = X_train.iloc[:, indices_vip]
+    X_test_vip  = X_test.iloc[:, indices_vip]
 
-    # ---------------------------------------------------------
-    # RONDA 2: ENTRENAMIENTO FINAL
-    # ---------------------------------------------------------
-    print("\n🟢 RONDA 2: Re-entrenando modelo FINAL con variables VIP...")
-    modelo_final = paso_3_entrenar_gpc_ard(X_train_vip, y_train)
+    # 4. Entrenamiento Final y Optimización Umbral
+    modelo_final, umbral_optimo = paso_5_entrenar_final_y_optimizar_umbral(
+        X_train_vip, y_train, N_SPLITS_CV, PRECISION_MINIMA
+    )
 
-    # ---------------------------------------------------------
-    # OPTIMIZACIÓN Y EVALUACIÓN (ESTILO CATBOOST)
-    # ---------------------------------------------------------
-    # Usamos la nueva función paso_5 importada de la lógica CatBoost
-    umbral_optimo = paso_5_optimizar_umbral_estilo_catboost(modelo_final, X_train_vip, y_train)
-    
-    # Usamos la nueva función paso_6 con reporte de errores detallado
-    paso_6_evaluacion_final_robusta(modelo_final, X_test_vip, y_test, umbral_optimo, features_vip)
+    # 4b. Visualizar Importancia (Permutation) - Ahora que tenemos el modelo final
+    paso_4_visualizar_importancia_sfs_permutation(modelo_final, X_train_vip, y_train, features_vip)
 
-    # ---------------------------------------------------------
-    # BONUS: CURVA DE APRENDIZAJE
-    # ---------------------------------------------------------
+    # 5. Evaluación Final
+    paso_6_evaluacion_final_robusta(
+        modelo_final, X_test_vip, y_test, umbral_optimo, features_vip
+    )
+
+    # 6. Bias-Varianza
     cv_plot = StratifiedKFold(n_splits=N_SPLITS_CV, shuffle=True, random_state=RANDOM_STATE_SEED)
     f2_scorer = make_scorer(fbeta_score, beta=FBETA_BETA)
-    
     paso_extra_graficar_bias_varianza(modelo_final, X_train_vip, y_train, cv_plot, f2_scorer)
-    
+
 if __name__ == "__main__":
     main()

@@ -483,7 +483,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     # *** CORRECCIÓN ***: Título del print
-    print("\nImportancia de las 32 características (features) para el modelo SMOTE + RandomForest:")
+    print("\nImportancia de las 32 características (features) para el modelo Balanced RandomForest:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -492,7 +492,7 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     ax.set_xlabel('Importancia de la Característica')
     ax.set_ylabel('Variable Predictora')
     # *** CORRECCIÓN ***: Título del gráfico
-    ax.set_title('Importancia de Características (SMOTE + RandomForest)')
+    ax.set_title('Importancia de Características (Balanced RandomForest)')
     plt.tight_layout()
     plt.show()
 
@@ -613,7 +613,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     # --- 2. Matriz de Confusión (Umbral Óptimo) ---
     matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
     # *** CORRECCIÓN ***: Título del gráfico
-    titulo = f"Matriz de Confusión - SMOTE + RF (Umbral Óptimo = {optimal_threshold:.4f})"
+    titulo = f"Matriz de Confusión - Balanced RandomForest (Umbral Óptimo = {optimal_threshold:.4f})"
     _plot_confusion_matrix(matriz_confusion_opt, titulo)
 
     # --- 3. Curva ROC ---
@@ -623,7 +623,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     auc_score = metrics.roc_auc_score(y_test, predicciones_test_proba)
     
     plt.figure()
-    plt.plot(fpr, tpr, label=f"SMOTE + RF (AUC = {auc_score:.4f})")
+    plt.plot(fpr, tpr, label=f"Balanced RandomForest (AUC = {auc_score:.4f})")
     plt.plot([0, 1], [0, 1], 'k--', label="Clasificador Aleatorio (AUC = 0.5)")
     plt.xlabel('Tasa de Falsos Positivos (FPR)')
     plt.ylabel('Tasa de Verdaderos Positivos (TPR)')
@@ -663,7 +663,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     print(falsos_positivos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
 
     # --- 5. Guardar Artefactos del Modelo ---
-    print("\nGuardando pipeline COMPLETO (Scaler+SMOTE+Selector+Modelo) y umbral...")
+    print("\nGuardando pipeline COMPLETO (Scaler+Selector+Modelo) y umbral...")
     
     artefactos_modelo = {
         "pipeline_completo": mejor_modelo, # ¡Aquí va todo junto!

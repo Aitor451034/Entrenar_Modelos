@@ -51,11 +51,11 @@ warnings.filterwarnings(action='ignore', category=FutureWarning)
 # El script sabrá separar qué es para el Selector y qué para el Modelo.
 MEJORES_PARAMETROS_GRID = {
     'model__class_weight': 'balanced',
-    'model__max_depth': 4,
-    'model__max_features': 'sqrt',
-    'model__min_samples_leaf': 10,
+    'model__max_depth': 6,
+    'model__max_features': 'log2',
+    'model__min_samples_leaf': 5,
     'model__n_estimators': 200,
-    'selector__n_features_to_select': 20
+    'selector__n_features_to_select': 25
 }
 
 # --- Configuración del Bucle ---
@@ -66,6 +66,8 @@ METRICA_FOCO = 'Recall'         # 'Recall' o 'Precision'
 # --- Umbral ---
 UMBRAL_DESVIACION_ESTABLE = 0.05 
 
+# --- Poner Umbral dado por el modelo -----
+UMBRAL_PERSONALIZADO = 0.2808
 
 # ==============================================================================
 # 3. FUNCIONES DE CARGA Y EXTRACCIÓN (LÓGICA ORIGINAL)
@@ -331,9 +333,18 @@ def ejecutar_prueba_estabilidad(n_iteraciones, umbral_std_estable, metric_focus)
             ('model', modelo_brf)
         ])
 
-        # C. Entrenar y Predecir
+        # C. Entrenar
         pipeline.fit(X_train, y_train)
-        y_pred = pipeline.predict(X_test)
+        
+        # ---------------------------------------------------------
+        # D. Predecir con UMBRAL PERSONALIZADO 
+        # ---------------------------------------------------------
+        # 1. Obtenemos la probabilidad de ser "Clase 1" (Defecto)
+        y_probas = pipeline.predict_proba(X_test)[:, 1]
+        
+        # 2. Comparamos contra tu variable global
+        y_pred = (y_probas >= UMBRAL_PERSONALIZADO).astype(int)
+        # ---------------------------------------------------------
         
         # D. Guardar métricas
         rec = recall_score(y_test, y_pred, pos_label=1, zero_division=0)

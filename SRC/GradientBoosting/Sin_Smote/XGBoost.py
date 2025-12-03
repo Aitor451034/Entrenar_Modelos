@@ -152,145 +152,190 @@ def preprocesar_dataframe_inicial(df):
     return new_df
 
 def extraer_features_fila_por_fila(new_df):
-    """Itera sobre cada fila y calcula el vector de 32 características."""
+    """
+    Versión OPTIMIZADA Y CORREGIDA.
+    Calcula las 32 características físicas y estadísticas filtrando el ruido.
+    """
     X_calculado = []
     y_calculado = []
-    print(f"Iniciando cálculo de features para {len(new_df)} puntos de soldadura...")
+    
+    print(f"Procesando {len(new_df)} puntos de soldadura (Algoritmo Corregido)...")
 
     for i in new_df.index:
-        # --- 1. Leer series temporales ---
-        datos_voltaje = new_df.loc[i, "Voltajes inst."]
-        datos_corriente = new_df.loc[i, "Corrientes inst."]
-        if pd.isna(datos_voltaje) or pd.isna(datos_corriente):
-            print(f"Advertencia: Datos nulos en fila {i}. Saltando.")
-            continue
+        try:
+            # --- 1. LECTURA Y LIMPIEZA DE SERIES ---
+            str_volt = new_df.loc[i, "Voltajes inst."]
+            str_corr = new_df.loc[i, "Corrientes inst."]
             
-        valores_voltaje = [float(v) for v in datos_voltaje.split(';') if v.strip()]
-        valores_voltaje = [round(v, 0) for v in valores_voltaje]
-        valores_corriente = [0.001 if float(v) == 0 else float(v) for v in datos_corriente.split(';') if v.strip()]
-        valores_corriente = [round(v, 0) for v in valores_corriente]
-
-        # --- 2. Calcular Resistencia y Tiempo ---
-        valores_resistencia = [v / c if c != 0 else 0 for v, c in zip(valores_voltaje, valores_corriente)]
-        valores_resistencia = [round(r, 2) for r in valores_resistencia]
-        valores_resistencia.append(0)
-        ns = int(new_df.loc[i, "Ns"])
-        ts2 = int(new_df.loc[i, "Ts2"])
-        t_soldadura = (np.linspace(0, ts2, ns + 1)).tolist()
-
-        if len(t_soldadura) != len(valores_resistencia):
-            min_len = min(len(t_soldadura), len(valores_resistencia))
+            if pd.isna(str_volt) or pd.isna(str_corr):
+                print(f"Fila {i}: Datos nulos. Saltando.")
+                continue
+                
+            # Convertir a float (Sin redondear agresivamente para no perder info)
+            raw_volt = np.array([float(v) for v in str_volt.split(';') if v.strip()])
+            raw_corr = np.array([float(v) for v in str_corr.split(';') if v.strip()])
+            
+            ns = int(new_df.loc[i, "Ns"])
+            ts2 = int(new_df.loc[i, "Ts2"])
+            t_soldadura = np.linspace(0, ts2, ns + 1)
+            
+            # Recorte de seguridad (igualar longitudes)
+            min_len = min(len(t_soldadura), len(raw_volt), len(raw_corr))
+            if min_len < 10: continue 
+            
             t_soldadura = t_soldadura[:min_len]
-            valores_resistencia = valores_resistencia[:min_len]
-            valores_voltaje = valores_voltaje[:min_len]
-        if not t_soldadura:
-            print(f"Advertencia: Fila {i} sin datos de series temporales. Saltando.")
+            raw_volt = raw_volt[:min_len]
+            raw_corr = raw_corr[:min_len]
+
+            # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
+            # CORRECCIÓN: Evitar infinitos si corriente es ~0
+            valores_resistencia = np.divide(raw_volt, raw_corr, out=np.zeros_like(raw_volt), where=np.abs(raw_corr)>0.5)
+            
+            # CORRECCIÓN: Filtro Savitzky-Golay (Vital para derivadas limpias)
+            window = min(11, len(valores_resistencia) if len(valores_resistencia)%2!=0 else len(valores_resistencia)-1)
+            if window > 3:
+                r_smooth = savgol_filter(valores_resistencia, window_length=window, polyorder=3)
+            else:
+                r_smooth = valores_resistencia
+
+            # --- 3. EXTRACCIÓN DE PUNTOS CLAVE ---
+            idx_max = np.argmax(r_smooth)
+            idx_min = np.argmin(r_smooth)
+            
+            resistencia_max = r_smooth[idx_max]
+            t_R_max = t_soldadura[idx_max]
+            
+            r0 = r_smooth[0]
+            r_e = r_smooth[-1]
+            t_e = t_soldadura[-1]
+            resistencia_min = np.min(r_smooth)
+            t_min = t_soldadura[idx_min] # Necesario para rango tiempo max-min
+
+            # --- 4. CÁLCULO DE ENERGÍA (CORREGIDO) ---
+            # CORRECCIÓN: kA * 1000 = Amperios (Antes tenías * 10)
+            i_amperios = raw_corr * 1000.0 
+            v_reales = raw_volt / 100.0    # Ajusta si tu sensor ya da voltios reales
+            t_segundos = t_soldadura / 1000.0
+            
+            potencia = v_reales * i_amperios
+            q_joules = np.trapz(potencia, x=t_segundos) # Energía real en Joules
+
+            # --- 5. DERIVADAS Y EVENTOS FÍSICOS ---
+            # Calculamos derivadas sobre la señal SUAVIZADA
+            d1 = np.gradient(r_smooth, t_soldadura)
+            d2 = np.gradient(d1, t_soldadura)
+            d3 = np.gradient(d2, t_soldadura)
+            
+            max_curvatura = np.max(np.abs(d2))
+            max_jerk = np.max(np.abs(d3))
+            puntos_inflexion = np.sum(np.diff(np.sign(d2)) != 0)
+            
+            # Picos y Valles
+            picos, _ = find_peaks(r_smooth)
+            valles, _ = find_peaks(-r_smooth)
+            num_picos = len(picos)
+            num_valles = len(valles)
+
+            # --- 6. CÁLCULOS ESTADÍSTICOS Y PENDIENTES ---
+            
+            # Pendiente Mínimos Cuadrados (CORREGIDA)
+            t_mean = np.mean(t_soldadura)
+            r_mean = np.mean(r_smooth)
+            # El denominador debe ser la varianza de T, no de R
+            numerador = np.sum((r_smooth - r_mean) * (t_soldadura - t_mean))
+            denominador = np.sum((t_soldadura - t_mean)**2) 
+            m_ols = numerador / denominador if denominador != 0 else 0
+
+            # Pendiente Voltaje
+            idx_v_max = np.argmax(raw_volt)
+            pendiente_V = 0
+            if idx_v_max < len(raw_volt) - 1:
+                dt_v = t_soldadura[idx_v_max] - t_e
+                if dt_v != 0:
+                     pendiente_V = (raw_volt[idx_v_max] - raw_volt[-1]) / dt_v
+
+            # Pendientes K3 y K4
+            k3 = ((resistencia_max - r0) / t_R_max * 100) if t_R_max > 0 else 0
+            delta_t_post = t_e - t_R_max
+            k4 = ((r_e - resistencia_max) / delta_t_post * 100) if delta_t_post > 0 else 0
+
+            # Pendientes negativas post-pico
+            pendientes_post = d1[idx_max:]
+            num_negativas = np.sum(pendientes_post < 0)
+
+            # Estadísticas
+            desv = np.std(r_smooth)
+            rms = np.sqrt(np.mean(r_smooth**2))
+            mediana = np.median(r_smooth)
+            varianza = np.var(r_smooth)
+            iqr = np.percentile(r_smooth, 75) - np.percentile(r_smooth, 25)
+            asim = skew(r_smooth) if len(r_smooth) > 2 else 0
+            curt = kurtosis(r_smooth) if len(r_smooth) > 2 else 0
+            
+            # Desviaciones parciales
+            desv_pre_mitad_t = np.std(r_smooth[:len(r_smooth)//2])
+            desv_R = np.std(r_smooth[:idx_max+1]) # Pre-pico
+            r_mean_post_max = np.mean(r_smooth[idx_max:]) if idx_max < len(r_smooth) else 0
+
+            # Áreas
+            area_total = np.trapz(r_smooth, t_soldadura)
+            idx_mitad = len(t_soldadura) // 2
+            area_pre_mitad = np.trapz(r_smooth[:idx_mitad], t_soldadura[:idx_mitad])
+            area_post_mitad = area_total - area_pre_mitad
+            
+            # Rangos
+            rango_r_beta_alfa = resistencia_max - r0
+            rango_r_e_beta = r_e - resistencia_max
+            rango_t_e_beta = t_e - t_R_max
+            rango_rmax_rmin = resistencia_max - resistencia_min
+            rango_tiempo_max_min = t_R_max - t_min
+
+            # --- 7. ENSAMBLAJE FINAL (ORDEN DE TU CÓDIGO ORIGINAL) ---
+            fila_features = [
+                float(rango_r_beta_alfa),       # 1
+                float(rango_t_e_beta),          # 2
+                float(rango_r_e_beta),          # 3
+                float(r0),                      # 4 (Resistencia Inicial)
+                float(k4),                      # 5
+                float(k3),                      # 6
+                float(iqr),                     # 7 (Rango intercuartílico)
+                float(desv_pre_mitad_t),        # 8
+                float(r_e),                     # 9 (Resistencia Final)
+                float(desv),                    # 10
+                float(pendiente_V),             # 11
+                float(rms),                     # 12
+                float(rango_rmax_rmin),         # 13
+                float(r_mean_post_max),         # 14
+                float(r_mean),                  # 15
+                float(desv_R),                  # 16 (Desv Pre-Pico)
+                float(num_negativas),           # 17
+                float(rango_tiempo_max_min),    # 18
+                float(area_total),              # 19
+                float(area_pre_mitad),          # 20
+                float(area_post_mitad),         # 21
+                float(max_curvatura),           # 22
+                float(puntos_inflexion),        # 23
+                float(max_jerk),                # 24
+                float(mediana),                 # 25
+                float(varianza),                # 26
+                float(asim),                    # 27
+                float(curt),                    # 28
+                float(num_picos),               # 29
+                float(num_valles),              # 30
+                float(q_joules),                # 31 (Energía corregida)
+                float(m_ols)                    # 32 (Mínimos Cuadrados corregido)
+            ]
+            
+            # Limpieza final de NaNs o Infinitos
+            fila_features = np.nan_to_num(fila_features, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            X_calculado.append(fila_features)
+            y_calculado.append(int(new_df.loc[i, "Etiqueta datos"]))
+
+        except Exception as e:
+            print(f"Error en fila {i}: {e}")
             continue
 
-        # --- 3. Puntos clave R(t) ---
-        resistencia_max = max(valores_resistencia)
-        I_R_max = np.argmax(valores_resistencia)
-        t_R_max = int(t_soldadura[I_R_max])
-        r0 = valores_resistencia[0]
-        t0 = t_soldadura[0]
-        r_e = valores_resistencia[-2]
-        t_e = t_soldadura[-2]
-        resistencia_min = min(valores_resistencia[:-1])
-        t_min = np.argmin(valores_resistencia[:-1])
-        t_soldadura_min = t_soldadura[t_min]
-        
-        # --- 4. Parámetros escalares ---
-        kAI2 = new_df.loc[i, "KAI2"]
-        f = new_df.loc[i, "Fuerza"]
-        
-        # --- 5. Cálculo de Features (Lógica original) ---
-        q = np.nan_to_num(((((kAI2 * 1000.0) ** 2) * (ts2 / 1000.0)) / (f * 10.0)), nan=0)
-        area_bajo_curva = np.nan_to_num(np.trapz(valores_resistencia, t_soldadura), nan=0)
-        resistencia_ultima = valores_resistencia[-2]
-        try:
-            delta_t_k4 = t_e - t_R_max
-            k4 = 0 if delta_t_k4 == 0 else ((r_e - resistencia_max) / delta_t_k4) * 100
-        except ZeroDivisionError: k4 = 0
-        k4 = np.nan_to_num(k4, nan=0)
-        try:
-            delta_t_k3 = t_R_max - t0
-            k3 = 0 if delta_t_k3 == 0 else ((resistencia_max - r0) / delta_t_k3) * 100
-        except ZeroDivisionError: k3 = 0
-        k3 = np.nan_to_num(k3, nan=0)
-        desv = np.nan_to_num(np.std(valores_resistencia), nan=0)
-        rms = np.nan_to_num(np.sqrt(np.mean(np.square(valores_resistencia))), nan=0)
-        rango_tiempo_max_min = np.nan_to_num(t_R_max - t_soldadura_min, nan=0)
-        rango_rmax_rmin = np.nan_to_num(resistencia_max - resistencia_min, nan=0)
-        voltaje_max = max(valores_voltaje)
-        t_max_v = np.argmax(valores_voltaje)
-        t_voltaje_max = t_soldadura[t_max_v]
-        voltaje_final = valores_voltaje[-2]
-        t_voltaje_final = t_soldadura[-2]
-        try:
-            delta_t_v = t_voltaje_max - t_voltaje_final
-            pendiente_V = 0 if delta_t_v == 0 else ((voltaje_max - voltaje_final) / delta_t_v)
-        except ZeroDivisionError: pendiente_V = 0
-        pendiente_V = np.nan_to_num(pendiente_V, nan=0)
-        r_mean_post_max = np.nan_to_num(np.mean(valores_resistencia[I_R_max:]), nan=0)
-        resistencia_inicial = np.nan_to_num(r0, nan=2000)
-        r_mean = np.nan_to_num(np.mean(valores_resistencia[:-1]), nan=0)
-        rango_r_beta_alfa = np.nan_to_num(resistencia_max - r0, nan=0)
-        rango_r_e_beta = np.nan_to_num(r_e - resistencia_max, nan=0)
-        rango_t_e_beta = np.nan_to_num(t_e - t_R_max, nan=0)
-        desv_R = np.nan_to_num(np.std(valores_resistencia[:I_R_max]), nan=0)
-        pendientes = calcular_pendiente(valores_resistencia, t_soldadura)
-        pendientes_post_max = pendientes[I_R_max:]
-        pendientes_negativas_post = sum(1 for p in pendientes_post_max if p < 0)
-        valores_resistencia_hasta_R_max = valores_resistencia[:I_R_max + 1]
-        valores_tiempo_hasta_R_max = t_soldadura[:I_R_max + 1]
-        area_pre_mitad = np.nan_to_num(np.trapz(valores_resistencia_hasta_R_max, valores_tiempo_hasta_R_max), nan=0)
-        valores_resistencia_desde_R_max = valores_resistencia[I_R_max:]
-        valores_tiempo_desde_R_max = t_soldadura[I_R_max:]
-        area_post_mitad = np.nan_to_num(np.trapz(valores_resistencia_desde_R_max, valores_tiempo_desde_R_max), nan=0)
-        try:
-            desv_pre_mitad_t = np.nan_to_num(np.std(valores_resistencia_hasta_R_max), nan=0)
-        except ValueError: desv_pre_mitad_t = 0
-        primera_derivada, segunda_derivada, tercera_derivada = calcular_derivadas(valores_resistencia, t_soldadura)
-        try:
-            max_curvatura = np.nan_to_num(np.max(np.abs(segunda_derivada)), nan=0)
-            puntos_inflexion = np.where(np.diff(np.sign(segunda_derivada)))[0]
-            num_puntos_inflexion = np.nan_to_num(len(puntos_inflexion), nan=0)
-            max_jerk = np.nan_to_num(np.max(np.abs(tercera_derivada)), nan=0)
-        except ValueError: max_curvatura, num_puntos_inflexion, max_jerk = 0, 0, 0
-        try:
-            mediana = np.nan_to_num(np.median(valores_resistencia), nan=0)
-            varianza = np.nan_to_num(np.var(valores_resistencia), nan=0)
-            rango_intercuartilico = np.nan_to_num((np.percentile(valores_resistencia, 75) - np.percentile(valores_resistencia, 25)), nan=0)
-            asimetria = np.nan_to_num(skew(valores_resistencia), nan=0)
-            curtosis = np.nan_to_num(kurtosis(valores_resistencia), nan=0)
-        except (ValueError, IndexError): mediana, varianza, rango_intercuartilico, asimetria, curtosis = 0, 0, 0, 0, 0
-        valores_resistencia_np = np.array(valores_resistencia)
-        picos, _ = find_peaks(valores_resistencia_np, height=0)
-        valles, _ = find_peaks(-valores_resistencia_np)
-        num_picos = np.nan_to_num(len(picos), nan=0)
-        num_valles = np.nan_to_num(len(valles), nan=0)
-        t_mean = np.nan_to_num(np.mean(t_soldadura), nan=0)
-        r_mean_ols = np.nan_to_num(np.mean(valores_resistencia), nan=0)
-        numerador = sum((r_mean_ols - ri) * (t_mean - ti) for ri, ti in zip(valores_resistencia, t_soldadura))
-        denominador = sum((r_mean_ols - ri) ** 2 for ri in valores_resistencia)
-        m_min_cuadrados = 0 if denominador == 0 else (numerador / denominador)
-
-        # --- 6. Ensamblar vector de características y etiqueta ---
-        X_calculado.append([
-            float(rango_r_beta_alfa), float(rango_t_e_beta), float(rango_r_e_beta),
-            float(resistencia_inicial), float(k4), float(k3),
-            float(rango_intercuartilico), float(desv_pre_mitad_t), float(resistencia_ultima),
-            float(desv), float(pendiente_V), float(rms),
-            float(rango_rmax_rmin), float(r_mean_post_max), float(r_mean),
-            float(desv_R), float(pendientes_negativas_post), float(rango_tiempo_max_min),
-            float(area_bajo_curva), float(area_pre_mitad), float(area_post_mitad),
-            float(max_curvatura), float(num_puntos_inflexion), float(max_jerk),
-            float(mediana), float(varianza), float(asimetria),
-            float(curtosis), float(num_picos), float(num_valles),
-            float(q), float(m_min_cuadrados)
-        ])
-        y_calculado.append(int(new_df.loc[i, "Etiqueta datos"]))
-        
     print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)
 

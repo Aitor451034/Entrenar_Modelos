@@ -1,3 +1,4 @@
+    
 # ==============================================================================
 # MÓDULO: CatBoost para Detección de Defectos en Soldadura
 # ==============================================================================
@@ -10,9 +11,9 @@ El proceso incluye:
 2.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
 3.  Definición de un pipeline que:
     a. Aplica escalado de características.
-    b. Selecciona las mejores características con RFE.
+    b. Selecciona las mejores características con SelectFromModel (usando CatBoost).
     c. Entrena un modelo CatBoostClassifier con pesos de clase.
-4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
+4.  Búsqueda aleatoria de hiperparámetros (RandomizedSearchCV) en el pipeline.
 5.  Optimización del umbral de decisión (Regla de Sinergia).
 6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
 7.  Guardado del pipeline completo CatBoost y el umbral.
@@ -32,9 +33,10 @@ from tkinter import filedialog
 # --- Funciones científicas y estadísticas ---
 from scipy.signal import find_peaks
 from scipy.stats import skew, kurtosis
+from scipy.signal import find_peaks,savgol_filter #Filtro de Savgol
 
 # --- Componentes de Scikit-learn ---
-from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
+from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
 from catboost import CatBoostClassifier
 from sklearn.metrics import (
@@ -422,13 +424,13 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     Configura y ejecuta GridSearchCV en un pipeline completo para prevenir Data Leakage.
     
     Este pipeline encadena tres pasos:
-    1. Escalado de características (StandardScaler)
-    2. Selección de características (RFE con RandomForest)
-    3. Clasificación (CatBoostClassifier)
+    1. Escalado de características (StandardScaler).
+    2. Selección de características (SelectFromModel con CatBoost).
+    3. Clasificación (CatBoostClassifier).
     
-    La búsqueda exhaustiva (GridSearchCV) optimiza hiperparámetros para maximizar F2-score.
+    La búsqueda aleatoria (RandomizedSearchCV) optimiza hiperparámetros para maximizar F2-score.
     """
-    print("Iniciando búsqueda de hiperparámetros para Pipeline Completo (Scaler + Selector + CatBoost)...")
+    print("Iniciando búsqueda aleatoria de hiperparámetros para Pipeline Completo (Scaler + Selector + CatBoost)...")
     
     # Configurar validación cruzada estratificada para mantener proporciones de clases
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
@@ -458,38 +460,41 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         # Paso 1: Normalizar características al rango [-1, 1]
         ('scaler', StandardScaler()),
         
-        # Paso 2: Seleccionar las mejores características usando Recursive Feature Elimination (RFE)
-        # RFE entrena un RandomForest y elimina iterativamente las features menos importantes
-        ('selector', RFE(
-            RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=-1),
-            step=0.1,  # Elimina el 10% de features en cada iteración (máxima precisión)
-            verbose=0
+        # Paso 2: Seleccionar las mejores características usando SelectFromModel.
+        # Se entrena un CatBoost para obtener la importancia de cada feature y se seleccionan las mejores.
+        # Es más rápido y consistente que usar RFE con otro modelo como RandomForest.
+        ('selector', SelectFromModel(
+            CatBoostClassifier(
+                random_seed=random_state,
+                verbose=False,
+                class_weights=class_weights,
+                task_type="GPU", # Usar GPU también para la selección acelera el proceso
+                devices='0'
+            )
         )),
         
         # Paso 3: Modelo clasificador CatBoost (Gradient Boosting)
         # CatBoost es robusto con features categóricas y maneja el desbalance de clases bien
         ('model', CatBoostClassifier(
-            loss_function="Logloss",              # Función de pérdida (logarítmica binaria)
-            eval_metric="Recall",                 # Métrica a monitorear durante entrenamiento
-            depth= [1,2],                              # Profundidad inicial de los árboles
-            learning_rate=[0.05, 0.1],                   # Tasa de aprendizaje inicial
-            bootstrap_type='Bernoulli',           # Tipo de bootstrapping (necesario para subsample)
-            iterations=[50,100,150],                       # Número máximo de iteraciones (árboles)
-            l2_leaf_reg=[10,30,50],                        # Regularización L2 (previene overfitting)
-            random_seed=random_state,             # Semilla para reproducibilidad
-            subsample=0.7,                        # Porcentaje de muestras para cada iteración
-            od_type="Iter",                       # Tipo de detección de overfitting
-            verbose=False,                        # No mostrar logs del entrenamiento
-            class_weights=class_weights,          # Pesos para compensar desbalance de clases
-            # task_type="GPU",    # Descomenta para usar GPU (si está disponible)
-            # devices='0',        # Especifica dispositivo GPU
+            # --- Parámetros Fijos ---
+            loss_function="Logloss",        # Función de pérdida para clasificación binaria.
+            eval_metric="Recall",           # Métrica a monitorear durante el entrenamiento.
+            bootstrap_type='Bernoulli',     # Tipo de bootstrapping.
+            random_seed=random_state,       # Semilla para reproducibilidad.
+            od_type="Iter",                 # Habilita la detección de sobreajuste.
+            verbose=False,                  # No mostrar logs detallados del entrenamiento.
+            class_weights=class_weights,    # Pesos para manejar el desbalance de clases.
+            
+            # --- PARÁMETROS PARA ACTIVAR LA GPU ---
+            task_type="GPU",                # ¡CLAVE! Indica a CatBoost que use la GPU.
+            devices='0'                     # Especifica el índice de la GPU a usar (normalmente '0' para la primera).
         ))
     ])
 
     # --- DEFINICIÓN DE LA GRILLA DE HIPERPARÁMETROS ---
-    # GridSearchCV probará todas las combinaciones posibles de estos valores
+    # RandomizedSearchCV probará una muestra aleatoria de las combinaciones de estos valores.
     # Los nombres con prefijo 'model__' son parámetros del modelo CatBoost
-    # Los nombres con prefijo 'selector__' son parámetros de RFE
+    # Los nombres con prefijo 'selector__' son parámetros del selector.
     param_grid_cb = {
         # Parámetros del modelo CatBoost
         'model__depth': [4, 6, 8],                          # Profundidad de los árboles (mayor = más complejo)
@@ -498,27 +503,32 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'model__subsample': [0.7, 0.85],                   # Porcentaje de muestras para entrenar cada árbol
         'model__min_data_in_leaf': [1, 5],                 # Número mínimo de muestras en hojas (previene overfitting)
         
-        # Parámetro del selector de características (RFE)
-        'selector__n_features_to_select': [3,5,8],    # Número final de características a seleccionar
+        # Parámetro del selector de características (SelectFromModel)
+        # max_features indica el número de características con mayor importancia a conservar.
+        'selector__max_features': [3, 5, 8],
         "model__iterations": [50, 100, 150]
     }
     
-    # Calcular número total de combinaciones a evaluar
-    total_combinaciones = np.prod([len(v) for v in param_grid_cb.values()])
-    print(f"GridSearchCV (CatBoost) probará {total_combinaciones} combinaciones de hiperparámetros.")
+    # Número de combinaciones aleatorias a probar. Es mucho más rápido que GridSearchCV.
+    n_iter_search = 100 
+    print(f"RandomizedSearchCV (CatBoost) probará {n_iter_search} combinaciones aleatorias de hiperparámetros.")
     print("Entrenando... (Esto puede tardar varios minutos)\n")
 
-    # --- EJECUTAR BÚSQUEDA EXHAUSTIVA (GridSearchCV) ---
-    # GridSearchCV entrena y valida el pipeline con cada combinación de parámetros
-    # Selecciona la combinación que maximiza la métrica F2-score en validación cruzada
-    search_cv = GridSearchCV(
+    # --- EJECUTAR BÚSQUEDA ALEATORIA (RandomizedSearchCV) ---
+    # Es mucho más eficiente que GridSearchCV para espacios de búsqueda grandes.
+    # Selecciona la combinación que maximiza la métrica F2-score en validación cruzada.
+    search_cv = RandomizedSearchCV(
         estimator=pipeline_cb,
-        param_grid=param_grid_cb,
-        cv=skf,                      # Usar validación cruzada estratificada
+        param_distributions=param_grid_cb, # Ojo: el parámetro se llama param_distributions
+        n_iter=n_iter_search,         # Número de combinaciones a probar
+        cv=skf,                       # Usar validación cruzada estratificada
         scoring=f2_scorer,            # Métrica a optimizar (F2-score)
-        n_jobs=-1,                    # Usar todos los núcleos disponibles
+        # Usar todos los núcleos. Al haber menos iteraciones, el riesgo de
+        # cuello de botella es menor y la paralelización es beneficiosa.
+        n_jobs=-1,
         verbose=2,                    # Mostrar progreso
-        refit=True                    # Reentranar con mejores parámetros en todo el set
+        refit=True,                   # Reentrenar con mejores parámetros en todo el set
+        random_state=random_state     # Para que la búsqueda aleatoria sea reproducible
     )
 
     # Entrenar el pipeline con la búsqueda de hiperparámetros
@@ -528,7 +538,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     mejor_modelo = search_cv.best_estimator_
     
     print("\n" + "="*70)
-    print("Entrenamiento (GridSearchCV) de CatBoost completado.")
+    print("Entrenamiento (RandomizedSearchCV) de CatBoost completado.")
     print(f"Mejores parámetros encontrados:\n{search_cv.best_params_}")
     print(f"Mejor score F2 (en validación cruzada): {search_cv.best_score_:.4f}")
     print("="*70 + "\n")
@@ -1142,29 +1152,28 @@ def main():
     # 
     # Qué hace:
     # 1. Crea un Pipeline que encadena tres transformaciones:
-    #    a) StandardScaler: Normaliza características al rango [-1, 1]
-    #    b) RFE: Selecciona las mejores ~20 características (elimina ruido)
+    #    a) StandardScaler: Normaliza características
+    #    b) SelectFromModel: Selecciona las N mejores características usando CatBoost
     #    c) CatBoost: Modelo de Gradient Boosting (árbol mejorado iterativamente)
     #
-    # 2. Ejecuta GridSearchCV que prueba 3×2×2×2×2×3 = 288 combinaciones de:
-    #    - Profundidad del árbol: [4, 6, 8]
+    # 2. Ejecuta RandomizedSearchCV que prueba 50 combinaciones aleatorias de:
+    #    - Profundidad del árbol: [4, 6, 8] 
     #    - Regularización L2: [3, 7]
     #    - Tasa de aprendizaje: [0.03, 0.06]
     #    - Subsample (% muestras por árbol): [0.7, 0.85]
     #    - Mínimo de datos en hojas: [1, 5]
-    #    - Número de features a seleccionar: [15, 20, 25]
+    #    - Número de features a seleccionar: [3, 5, 8]
+    #    - Iteraciones: [50, 100, 150]
     #
     # 3. Usa validación cruzada estratificada (5 folds) para evaluar cada combo
     #
     # 4. Selecciona la combinación que MAXIMIZA el F2-score
     #    (F2 da más peso al Recall que a Precision, importante para detectar defectos)
     #
-    # ⚠ ADVERTENCIA: Este paso puede tardar 30+ minutos (depende del hardware)
     print("\n" + "="*70)
-    print("PASO 3: ENTRENANDO MODELO CON BÚSQUEDA DE HIPERPARÁMETROS (GridSearchCV)")
+    print("PASO 3: ENTRENANDO MODELO CON BÚSQUEDA DE HIPERPARÁMETROS (RandomizedSearchCV)")
     print("="*70)
     print("⏳ ADVERTENCIA: Este paso puede tardar varios minutos...")
-    print("   (Probando 288 combinaciones de hiperparámetros con validación cruzada)")
     mejor_modelo = paso_3_entrenar_modelo(
         X_train, y_train, 
         N_SPLITS_CV, FBETA_BETA, RANDOM_STATE_SEED

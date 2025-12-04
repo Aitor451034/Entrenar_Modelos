@@ -1,17 +1,20 @@
 """
-Script para entrenar un modelo Híbrido (SMOTE + Random Forest)
-con el objetivo de detectar puntos de soldadura defectuosos (pegados).
+Script para entrenar un modelo BalancedRandomForestClassifier con el objetivo 
+de detectar puntos de soldadura defectuosos (pegados).
+
+Este modelo maneja internamente el desbalance de clases sin necesidad de SMOTE.
 
 El proceso incluye:
 1.  Carga de datos y extracción de 32 características (feature engineering).
-2.  Separación de datos en entrenamiento (Train) y prueba (Test) y escalado.
+2.  Separación de datos en entrenamiento (Train) y prueba (Test).
 3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
-    a. Aplica SMOTE para sobremuestrear la clase minoritaria.
-    b. Entrena un modelo RandomForestClassifier.
+    a. Escala los datos (StandardScaler).
+    b. Realiza selección de características (RFE con RandomForest).
+    c. Entrena un modelo BalancedRandomForestClassifier.
 4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
-5.  Optimización del umbral de decisión (Regla de Sinergia).
+5.  Optimización del umbral de decisión basado en una precisión mínima.
 6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
-7.  Guardado del pipeline completo (SMOTE + Scaler + RF) y el umbral.
+7.  Guardado del pipeline completo (Scaler + Selector + Modelo) y el umbral.
 """
 
 # ==============================================================================
@@ -110,27 +113,68 @@ def leer_archivo():
         return None
 
 def calcular_pendiente(resistencias, tiempos):
-    """Calcula la pendiente (tasa de cambio) entre valores consecutivos."""
+    """
+    Calcula la pendiente (tasa de cambio) entre valores consecutivos de resistencia.
+    
+    Esta función aproxima la primera derivada de la resistencia con respecto al tiempo (dR/dt)
+    utilizando diferencias finitas entre puntos adyacentes.
+    """
+    # Si no hay suficientes puntos para calcular una pendiente (0 o 1), devuelve una lista con cero.
     if len(resistencias) <= 1 or len(tiempos) <= 1:
         return [0]
+    
     pendientes = []
+    # Itera sobre cada par de puntos consecutivos (i, i+1).
     for i in range(len(resistencias) - 1):
+        # Fórmula para el cambio en el tiempo (eje X): Δt = t₂ - t₁
         delta_t = tiempos[i + 1] - tiempos[i]
+        # Fórmula para el cambio en la resistencia (eje Y): ΔR = R₂ - R₁
         delta_r = resistencias[i + 1] - resistencias[i]
+        
+        # Se previene la división por cero si dos puntos tienen el mismo tiempo.
         if delta_t == 0:
             pendiente_actual = 0
         else:
+            # Fórmula de la pendiente: m = ΔR / Δt
+            # Se multiplica por 100 para escalar el valor, posiblemente para expresarlo
+            # en una unidad diferente o para mejorar su peso como característica en el modelo.
             pendiente_actual = (delta_r / delta_t) * 100
+            
+        # 1. np.nan_to_num: Asegura que si el cálculo resulta en NaN (Not a Number), se reemplace por 0.
+        # 2. round(..., 2): Redondea el resultado a 2 decimales para estandarizar la salida.
         pendientes.append(round(np.nan_to_num(pendiente_actual, nan=0), 2))
     return pendientes
 
 def calcular_derivadas(resistencias, tiempos):
-    """Calcula la 1ra, 2da y 3ra derivada de la curva R(t)."""
+    """
+    Calcula la 1ra, 2da y 3ra derivada de la curva R(t) usando np.gradient.
+    
+    np.gradient estima la derivada de un conjunto de puntos de datos usando
+    diferencias finitas centrales para los puntos interiores y diferencias de 
+    primer orden (hacia adelante/atrás) en los bordes. Es más preciso que
+    calcular la pendiente simple entre dos puntos.
+    """
+    # Si no hay suficientes puntos, no se puede calcular la derivada.
     if len(resistencias) <= 1 or len(tiempos) <= 1:
         return np.array([0]), np.array([0]), np.array([0])
+        
+    # --- 1ª Derivada (Velocidad de cambio de la resistencia) ---
+    # Fórmula (simplificada para puntos interiores): f'(x) ≈ (f(x+h) - f(x-h)) / 2h
+    # np.gradient(y, x) calcula la derivada dy/dx.
+    # Aquí, calcula dR/dt, que representa la "velocidad" de cambio de la resistencia.
     primera_derivada = np.gradient(resistencias, tiempos)
+    
+    # --- 2ª Derivada (Aceleración de la resistencia) ---
+    # Se calcula la derivada de la primera derivada para obtener la segunda (d²R/dt²).
+    # Representa la "aceleración" o la concavidad/curvatura de la curva R(t).
     segunda_derivada = np.gradient(primera_derivada, tiempos)
+    
+    # --- 3ª Derivada (Jerk o "sacudida" de la resistencia) ---
+    # Se calcula la derivada de la segunda derivada para obtener la tercera (d³R/dt³).
+    # Representa el "jerk" o la tasa de cambio de la aceleración.
     tercera_derivada = np.gradient(segunda_derivada, tiempos)
+    
+    # Se devuelven las tres derivadas, reemplazando cualquier posible valor NaN (Not a Number) por 0.
     return (
         np.nan_to_num(primera_derivada, nan=0),
         np.nan_to_num(segunda_derivada, nan=0),
@@ -138,15 +182,44 @@ def calcular_derivadas(resistencias, tiempos):
     )
 
 def preprocesar_dataframe_inicial(df):
-    """Limpia el DataFrame crudo."""
+    """
+    Limpia y prepara el DataFrame crudo de entrada para la extracción de características.
+    
+    Este proceso incluye la selección de columnas relevantes, el renombramiento,
+    la conversión de tipos de datos y el manejo de formatos numéricos.
+    """
+    # 1. Selección de columnas específicas por índice.
+    # Se eligen las columnas que contienen la información necesaria para el análisis.
+    # Los índices [0, 8, 9, 10, 20, 27, 67, 98] corresponden a:
+    # id punto, Ns, Corrientes inst., Voltajes inst., KAI2, Ts2, Fuerza, Etiqueta datos.
     new_df = df.iloc[:, [0, 8, 9, 10, 20, 27, 67, 98]]
+    
+    # 2. Eliminación de las últimas dos filas.
+    # Esto se hace para eliminar posibles filas de metadatos o resúmenes al final del archivo.
     new_df = new_df.iloc[:-2]
+    
+    # 3. Asignación de nombres descriptivos a las columnas seleccionadas.
     new_df.columns = ["id punto", "Ns", "Corrientes inst.", "Voltajes inst.", "KAI2", "Ts2", "Fuerza", "Etiqueta datos"]
+    
+    # 4. Conversión de columnas numéricas a tipo float.
+    # Se utiliza pd.to_numeric con 'errors='coerce'' para convertir los valores a números.
+    # Si un valor no puede convertirse (ej. es texto no numérico), se reemplaza por NaN (Not a Number).
     for col in ["KAI2", "Ts2", "Fuerza"]:
         new_df[col] = pd.to_numeric(new_df[col], errors='coerce')
+        
+    # 5. Redondeo de columnas de tipo float a 4 decimales.
+    # Esto ayuda a estandarizar la precisión de los datos numéricos.
     float_cols = new_df.select_dtypes(include='float64').columns
     new_df = new_df.round({col: 4 for col in float_cols})
+    
+    # 6. Reindexación del DataFrame.
+    # Se asigna un nuevo índice secuencial que comienza desde 1.
     new_df.index = range(1, len(new_df) + 1)
+    
+    # 7. Conversión general de columnas de tipo 'object' (cadenas) a float.
+    # Se itera sobre todas las columnas del DataFrame original. Si una columna es de tipo 'object',
+    # se intenta reemplazar las comas por puntos (formato decimal europeo a americano)
+    # y luego convertir la columna completa a tipo float. Los errores se ignoran con 'try-except'.
     for col in df.columns:
         if df[col].dtype == object:
             try:
@@ -159,6 +232,20 @@ def extraer_features_fila_por_fila(new_df):
     """
     Versión OPTIMIZADA Y CORREGIDA.
     Calcula las 32 características físicas y estadísticas filtrando el ruido.
+    
+    Esta función itera sobre cada punto de soldadura (fila) del DataFrame 
+    preprocesado y extrae un vector de 32 características numéricas que 
+    describen la curva de resistencia dinámica (R(t)) y otras señales.
+    
+    El proceso para cada punto es:
+    1. Leer las series temporales de voltaje y corriente.
+    2. Calcular la resistencia dinámica R(t) = V(t) / I(t).
+    3. Suavizar la curva de resistencia para eliminar ruido usando un filtro Savitzky-Golay.
+    4. Identificar puntos clave en la curva R(t) suavizada (inicio, fin, máximo, mínimo).
+    5. Calcular la energía total de la soldadura (integral de la potencia).
+    6. Calcular derivadas (velocidad, aceleración, jerk) de la curva R(t).
+    7. Extraer características geométricas, estadísticas y físicas de estas curvas.
+    8. Ensamblar las 32 características en un único vector.
     """
     X_calculado = []
     y_calculado = []
@@ -168,6 +255,8 @@ def extraer_features_fila_por_fila(new_df):
     for i in new_df.index:
         try:
             # --- 1. LECTURA Y LIMPIEZA DE SERIES ---
+            # Se leen las cadenas de texto que contienen los valores de voltaje y corriente,
+            # separados por ';'.
             str_volt = new_df.loc[i, "Voltajes inst."]
             str_corr = new_df.loc[i, "Corrientes inst."]
             
@@ -175,27 +264,34 @@ def extraer_features_fila_por_fila(new_df):
                 print(f"Fila {i}: Datos nulos. Saltando.")
                 continue
                 
-            # Convertir a float (Sin redondear agresivamente para no perder info)
+            # Se convierten las cadenas a arrays de números (float).
             raw_volt = np.array([float(v) for v in str_volt.split(';') if v.strip()])
             raw_corr = np.array([float(v) for v in str_corr.split(';') if v.strip()])
             
+            # Se genera el eje de tiempo para la soldadura.
+            # Ns: Número de muestras.
+            # Ts2: Tiempo total de soldadura en milisegundos.
             ns = int(new_df.loc[i, "Ns"])
             ts2 = int(new_df.loc[i, "Ts2"])
             t_soldadura = np.linspace(0, ts2, ns + 1)
             
-            # Recorte de seguridad (igualar longitudes)
+            # Se asegura que todos los arrays (tiempo, voltaje, corriente) tengan la misma longitud
+            # para evitar errores en cálculos vectoriales.
             min_len = min(len(t_soldadura), len(raw_volt), len(raw_corr))
-            if min_len < 10: continue 
+            if min_len < 10: continue # Se omiten soldaduras con muy pocos datos.
             
             t_soldadura = t_soldadura[:min_len]
             raw_volt = raw_volt[:min_len]
             raw_corr = raw_corr[:min_len]
 
             # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
-            # CORRECCIÓN: Evitar infinitos si corriente es ~0
+            # Se calcula la resistencia dinámica usando la Ley de Ohm: R(t) = V(t) / I(t).
+            # Se usa np.divide con 'where' para evitar la división por cero si la corriente es muy baja.
             valores_resistencia = np.divide(raw_volt, raw_corr, out=np.zeros_like(raw_volt), where=np.abs(raw_corr)>0.5)
             
-            # CORRECCIÓN: Filtro Savitzky-Golay (Vital para derivadas limpias)
+            # Se aplica un filtro Savitzky-Golay a la señal de resistencia.
+            # Este filtro suaviza la curva ajustando un polinomio a subconjuntos de datos,
+            # lo que es crucial para obtener derivadas estables y reducir el ruido del sensor.
             window = min(11, len(valores_resistencia) if len(valores_resistencia)%2!=0 else len(valores_resistencia)-1)
             if window > 3:
                 r_smooth = savgol_filter(valores_resistencia, window_length=window, polyorder=3)
@@ -203,54 +299,67 @@ def extraer_features_fila_por_fila(new_df):
                 r_smooth = valores_resistencia
 
             # --- 3. EXTRACCIÓN DE PUNTOS CLAVE ---
-            idx_max = np.argmax(r_smooth)
-            idx_min = np.argmin(r_smooth)
+            # Se identifican los puntos más importantes de la curva de resistencia suavizada.
+            idx_max = np.argmax(r_smooth) # Índice del valor máximo de resistencia.
+            idx_min = np.argmin(r_smooth) # Índice del valor mínimo de resistencia.
             
-            resistencia_max = r_smooth[idx_max]
-            t_R_max = t_soldadura[idx_max]
+            resistencia_max = r_smooth[idx_max] # Valor máximo de resistencia (Beta).
+            t_R_max = t_soldadura[idx_max]      # Tiempo en el que ocurre el máximo.
             
-            r0 = r_smooth[0]
-            r_e = r_smooth[-1]
-            t_e = t_soldadura[-1]
-            resistencia_min = np.min(r_smooth)
-            t_min = t_soldadura[idx_min] # Necesario para rango tiempo max-min
+            r0 = r_smooth[0]      # Resistencia inicial (Alfa).
+            r_e = r_smooth[-1]    # Resistencia final.
+            t_e = t_soldadura[-1] # Tiempo final.
+            resistencia_min = np.min(r_smooth) # Valor mínimo de resistencia.
+            t_min = t_soldadura[idx_min]       # Tiempo en el que ocurre el mínimo.
 
             # --- 4. CÁLCULO DE ENERGÍA (CORREGIDO) ---
-            # CORRECCIÓN: kA * 1000 = Amperios (Antes tenías * 10)
-            i_amperios = raw_corr * 1000.0 
-            v_reales = raw_volt / 100.0    # Ajusta si tu sensor ya da voltios reales
-            t_segundos = t_soldadura / 1000.0
+            # Se calcula la energía total disipada durante la soldadura en Joules.
+            # Fórmula: Energía (Q) = ∫ P(t) dt = ∫ V(t) * I(t) dt
+            # Se convierten las unidades a estándar (Amperios, Voltios, Segundos).
+            i_amperios = raw_corr * 1000.0      # Corriente de kA a A.
+            v_reales = raw_volt / 100.0         # Voltaje (ajustar según la escala del sensor).
+            t_segundos = t_soldadura / 1000.0   # Tiempo de ms a s.
             
-            potencia = v_reales * i_amperios
-            q_joules = np.trapz(potencia, x=t_segundos) # Energía real en Joules
+            potencia = v_reales * i_amperios # Potencia instantánea P(t) = V(t) * I(t).
+            # Se integra la potencia respecto al tiempo usando la regla del trapecio.
+            q_joules = np.trapz(potencia, x=t_segundos)
 
             # --- 5. DERIVADAS Y EVENTOS FÍSICOS ---
-            # Calculamos derivadas sobre la señal SUAVIZADA
+            # Se calculan las derivadas de la curva de resistencia suavizada para analizar su dinámica.
+            # d1 (1ª derivada, dR/dt): Velocidad de cambio de la resistencia.
+            # d2 (2ª derivada, d²R/dt²): Aceleración de la resistencia (concavidad/curvatura).
+            # d3 (3ª derivada, d³R/dt³): Jerk o sobreaceleración de la resistencia.
             d1 = np.gradient(r_smooth, t_soldadura)
             d2 = np.gradient(d1, t_soldadura)
             d3 = np.gradient(d2, t_soldadura)
             
+            # Característica 22: Máxima curvatura de la señal R(t).
             max_curvatura = np.max(np.abs(d2))
+            # Característica 24: Máximo jerk de la señal R(t).
             max_jerk = np.max(np.abs(d3))
+            # Característica 23: Número de puntos de inflexión. Se cuentan los cruces por cero de la 2ª derivada.
             puntos_inflexion = np.sum(np.diff(np.sign(d2)) != 0)
             
-            # Picos y Valles
+            # Se cuentan los picos (máximos locales) y valles (mínimos locales) en la curva R(t).
             picos, _ = find_peaks(r_smooth)
             valles, _ = find_peaks(-r_smooth)
+            # Característica 29: Número de picos.
             num_picos = len(picos)
+            # Característica 30: Número de valles.
             num_valles = len(valles)
 
             # --- 6. CÁLCULOS ESTADÍSTICOS Y PENDIENTES ---
             
-            # Pendiente Mínimos Cuadrados (CORREGIDA)
+            # Característica 32: Pendiente de la recta de regresión por mínimos cuadrados (OLS).
+            # Representa la tendencia general de la resistencia durante todo el proceso.
+            # Fórmula: m = Cov(R, t) / Var(t)
             t_mean = np.mean(t_soldadura)
             r_mean = np.mean(r_smooth)
-            # El denominador debe ser la varianza de T, no de R
             numerador = np.sum((r_smooth - r_mean) * (t_soldadura - t_mean))
             denominador = np.sum((t_soldadura - t_mean)**2) 
             m_ols = numerador / denominador if denominador != 0 else 0
 
-            # Pendiente Voltaje
+            # Característica 11: Pendiente de la curva de voltaje desde su pico hasta el final.
             idx_v_max = np.argmax(raw_volt)
             pendiente_V = 0
             if idx_v_max < len(raw_volt) - 1:
@@ -258,79 +367,104 @@ def extraer_features_fila_por_fila(new_df):
                 if dt_v != 0:
                      pendiente_V = (raw_volt[idx_v_max] - raw_volt[-1]) / dt_v
 
-            # Pendientes K3 y K4
+            # Característica 6 (k3): Pendiente desde el inicio hasta el pico de resistencia.
+            # Mide la velocidad de calentamiento inicial. Fórmula: (R_max - R_inicial) / t_R_max
             k3 = ((resistencia_max - r0) / t_R_max * 100) if t_R_max > 0 else 0
+            # Característica 5 (k4): Pendiente desde el pico de resistencia hasta el final.
+            # Mide la velocidad de enfriamiento o colapso. Fórmula: (R_final - R_max) / (t_final - t_R_max)
             delta_t_post = t_e - t_R_max
             k4 = ((r_e - resistencia_max) / delta_t_post * 100) if delta_t_post > 0 else 0
 
-            # Pendientes negativas post-pico
+            # Característica 17: Número de puntos con pendiente negativa después del pico de resistencia.
             pendientes_post = d1[idx_max:]
             num_negativas = np.sum(pendientes_post < 0)
 
-            # Estadísticas
+            # --- Características Estadísticas sobre la curva R(t) ---
+            # Característica 10: Desviación estándar de toda la curva de resistencia.
             desv = np.std(r_smooth)
+            # Característica 12: Valor eficaz (Root Mean Square) de la resistencia. Mide la "potencia" de la señal.
             rms = np.sqrt(np.mean(r_smooth**2))
+            # Característica 25: Mediana de la resistencia.
             mediana = np.median(r_smooth)
+            # Característica 26: Varianza de la resistencia.
             varianza = np.var(r_smooth)
+            # Característica 7: Rango intercuartílico (IQR). Mide la dispersión del 50% central de los datos.
             iqr = np.percentile(r_smooth, 75) - np.percentile(r_smooth, 25)
+            # Característica 27: Coeficiente de asimetría (Skewness).
             asim = skew(r_smooth) if len(r_smooth) > 2 else 0
+            # Característica 28: Curtosis. Mide qué tan "puntiaguda" es la distribución.
             curt = kurtosis(r_smooth) if len(r_smooth) > 2 else 0
             
-            # Desviaciones parciales
+            # --- Características Estadísticas Parciales ---
+            # Característica 8: Desviación estándar de la primera mitad temporal de la curva.
             desv_pre_mitad_t = np.std(r_smooth[:len(r_smooth)//2])
-            desv_R = np.std(r_smooth[:idx_max+1]) # Pre-pico
+            # Característica 16: Desviación estándar de la resistencia antes del pico.
+            desv_R = np.std(r_smooth[:idx_max+1])
+            # Característica 14: Resistencia media después del pico.
             r_mean_post_max = np.mean(r_smooth[idx_max:]) if idx_max < len(r_smooth) else 0
 
-            # Áreas
+            # --- Características basadas en Áreas ---
+            # Se calcula el área bajo la curva de R(t) usando la regla del trapecio.
+            # Característica 19: Área total bajo la curva R(t).
             area_total = np.trapz(r_smooth, t_soldadura)
             idx_mitad = len(t_soldadura) // 2
+            # Característica 20: Área en la primera mitad del tiempo.
             area_pre_mitad = np.trapz(r_smooth[:idx_mitad], t_soldadura[:idx_mitad])
+            # Característica 21: Área en la segunda mitad del tiempo.
             area_post_mitad = area_total - area_pre_mitad
             
-            # Rangos
+            # --- Características basadas en Rangos ---
+            # Característica 1: Rango de resistencia entre el pico y el inicio (R_max - R_inicial).
             rango_r_beta_alfa = resistencia_max - r0
+            # Característica 3: Rango de resistencia entre el final y el pico (R_final - R_max).
             rango_r_e_beta = r_e - resistencia_max
+            # Característica 2: Rango de tiempo entre el final y el pico (t_final - t_R_max).
             rango_t_e_beta = t_e - t_R_max
+            # Característica 13: Rango entre la resistencia máxima y mínima.
             rango_rmax_rmin = resistencia_max - resistencia_min
+            # Característica 18: Rango de tiempo entre el máximo y el mínimo.
             rango_tiempo_max_min = t_R_max - t_min
 
             # --- 7. ENSAMBLAJE FINAL (ORDEN DE TU CÓDIGO ORIGINAL) ---
+            # Se recopilan todas las características calculadas en una lista, en un orden específico
+            # que coincide con la lista `FEATURE_NAMES`.
             fila_features = [
-                float(rango_r_beta_alfa),       # 1
-                float(rango_t_e_beta),          # 2
-                float(rango_r_e_beta),          # 3
-                float(r0),                      # 4 (Resistencia Inicial)
-                float(k4),                      # 5
-                float(k3),                      # 6
-                float(iqr),                     # 7 (Rango intercuartílico)
-                float(desv_pre_mitad_t),        # 8
-                float(r_e),                     # 9 (Resistencia Final)
-                float(desv),                    # 10
-                float(pendiente_V),             # 11
-                float(rms),                     # 12
-                float(rango_rmax_rmin),         # 13
-                float(r_mean_post_max),         # 14
-                float(r_mean),                  # 15
-                float(desv_R),                  # 16 (Desv Pre-Pico)
-                float(num_negativas),           # 17
-                float(rango_tiempo_max_min),    # 18
-                float(area_total),              # 19
-                float(area_pre_mitad),          # 20
-                float(area_post_mitad),         # 21
-                float(max_curvatura),           # 22
-                float(puntos_inflexion),        # 23
-                float(max_jerk),                # 24
-                float(mediana),                 # 25
-                float(varianza),                # 26
-                float(asim),                    # 27
-                float(curt),                    # 28
-                float(num_picos),               # 29
-                float(num_valles),              # 30
-                float(q_joules),                # 31 (Energía corregida)
-                float(m_ols)                    # 32 (Mínimos Cuadrados corregido)
+                float(rango_r_beta_alfa),       # 1. rango_r_beta_alfa: R_max - R_inicial
+                float(rango_t_e_beta),          # 2. rango_t_e_beta: t_final - t_R_max
+                float(rango_r_e_beta),          # 3. rango_r_e_beta: R_final - R_max
+                float(r0),                      # 4. resistencia_inicial: R al tiempo t=0
+                float(k4),                      # 5. k4: Pendiente de R(t) post-pico
+                float(k3),                      # 6. k3: Pendiente de R(t) pre-pico
+                float(iqr),                     # 7. rango_intercuartilico: IQR de R(t)
+                float(desv_pre_mitad_t),        # 8. desv_pre_mitad_t: Desv. estándar de R(t) en la primera mitad del tiempo
+                float(r_e),                     # 9. resistencia_ultima: R al tiempo t=final
+                float(desv),                    # 10. desv: Desv. estándar de toda la curva R(t)
+                float(pendiente_V),             # 11. pendiente_V: Pendiente de V(t) desde su pico hasta el final
+                float(rms),                     # 12. rms: Valor eficaz (RMS) de R(t)
+                float(rango_rmax_rmin),         # 13. rango_rmax_rmin: R_max - R_min
+                float(r_mean_post_max),         # 14. r_mean_post_max: Media de R(t) después del pico
+                float(r_mean),                  # 15. r_mean: Media de toda la curva R(t)
+                float(desv_R),                  # 16. desv_R_pre_max: Desv. estándar de R(t) antes del pico
+                float(num_negativas),           # 17. pendientes_negativas_post: Conteo de pendientes < 0 después del pico
+                float(rango_tiempo_max_min),    # 18. rango_tiempo_max_min: t_R_max - t_R_min
+                float(area_total),              # 19. area_bajo_curva: Integral de R(t) dt
+                float(area_pre_mitad),          # 20. area_pre_mitad: Integral de R(t) en la primera mitad del tiempo
+                float(area_post_mitad),         # 21. area_post_mitad: Integral de R(t) en la segunda mitad del tiempo
+                float(max_curvatura),           # 22. max_curvatura: Máximo de la 2ª derivada de R(t)
+                float(puntos_inflexion),        # 23. num_puntos_inflexion: Conteo de cruces por cero de la 2ª derivada
+                float(max_jerk),                # 24. max_jerk: Máximo de la 3ª derivada de R(t)
+                float(mediana),                 # 25. mediana: Mediana de R(t)
+                float(varianza),                # 26. varianza: Varianza de R(t)
+                float(asim),                    # 27. asimetria: Asimetría (skewness) de R(t)
+                float(curt),                    # 28. curtosis: Curtosis de R(t)
+                float(num_picos),               # 29. num_picos: Número de máximos locales en R(t)
+                float(num_valles),              # 30. num_valles: Número de mínimos locales en R(t)
+                float(q_joules),                # 31. q: Energía total de la soldadura en Joules (Integral de V*I dt)
+                float(m_ols)                    # 32. m_min_cuadrados: Pendiente de la regresión lineal de R(t)
             ]
             
-            # Limpieza final de NaNs o Infinitos
+            # Limpieza final de NaNs o Infinitos que pudieran generarse por divisiones por cero
+            # u otros problemas numéricos, reemplazándolos por 0.0.
             fila_features = np.nan_to_num(fila_features, nan=0.0, posinf=0.0, neginf=0.0)
             
             X_calculado.append(fila_features)
@@ -630,7 +764,6 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
 
     # --- 2. Matriz de Confusión (Umbral Óptimo) ---
     matriz_confusion_opt = confusion_matrix(y_test, predicciones_test_binarias)
-    # *** CORRECCIÓN ***: Título del gráfico
     titulo = f"Matriz de Confusión - Balanced RandomForest (Umbral Óptimo = {optimal_threshold:.4f})"
     _plot_confusion_matrix(matriz_confusion_opt, titulo)
 

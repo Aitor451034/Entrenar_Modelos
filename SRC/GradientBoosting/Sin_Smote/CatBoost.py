@@ -468,8 +468,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
                 random_seed=random_state,
                 verbose=False,
                 class_weights=class_weights,
-                task_type="GPU", # Usar GPU también para la selección acelera el proceso
-                devices='0'
+                #task_type="GPU", # Usar GPU también para la selección acelera el proceso
+                #devices='0'
             )
         )),
         
@@ -486,31 +486,32 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             class_weights=class_weights,    # Pesos para manejar el desbalance de clases.
             
             # --- PARÁMETROS PARA ACTIVAR LA GPU ---
-            task_type="GPU",                # ¡CLAVE! Indica a CatBoost que use la GPU.
-            devices='0'                     # Especifica el índice de la GPU a usar (normalmente '0' para la primera).
+            #task_type="GPU",                # ¡CLAVE! Indica a CatBoost que use la GPU.
+            #devices='0'                     # Especifica el índice de la GPU a usar (normalmente '0' para la primera).
         ))
     ])
 
     # --- DEFINICIÓN DE LA GRILLA DE HIPERPARÁMETROS ---
     # RandomizedSearchCV probará una muestra aleatoria de las combinaciones de estos valores.
     # Los nombres con prefijo 'model__' son parámetros del modelo CatBoost
-    # Los nombres con prefijo 'selector__' son parámetros del selector.
     param_grid_cb = {
-        # Parámetros del modelo CatBoost
-        'model__depth': [4, 6, 8],                          # Profundidad de los árboles (mayor = más complejo)
-        'model__l2_leaf_reg': [3, 7],                       # Regularización (mayor = menos overfitting)
-        'model__learning_rate': [0.03, 0.06],              # Tasa de aprendizaje (menor = aprendizaje más lento pero potencialmente mejor)
-        'model__subsample': [0.7, 0.85],                   # Porcentaje de muestras para entrenar cada árbol
-        'model__min_data_in_leaf': [1, 5],                 # Número mínimo de muestras en hojas (previene overfitting)
-        
-        # Parámetro del selector de características (SelectFromModel)
-        # max_features indica el número de características con mayor importancia a conservar.
-        'selector__max_features': [3, 5, 8],
-        "model__iterations": [50, 100, 150]
+        # --- Parámetros del modelo CatBoost para reducir overfitting ---
+        'model__depth': [4, 5, 6],                          # Profundidad de los árboles (menor = menos complejo)
+        'model__l2_leaf_reg': [3, 5, 7, 10],                 # Regularización L2 (mayor = menos overfitting)
+        'model__learning_rate': [0.03, 0.05, 0.08],          # Tasa de aprendizaje
+        'model__subsample': [0.7, 0.8, 0.9],                 # Porcentaje de muestras para entrenar cada árbol
+        'model__min_data_in_leaf': [5, 10, 20],              # Muestras mínimas en hojas (previene overfitting en ruido)
+        'model__iterations': [100, 200, 300],                # Más iteraciones, con early stopping
+
+        # El parámetro 'selector__max_features' se ha eliminado.
+        # Ahora, SelectFromModel usará su umbral por defecto ('mean'),
+        # seleccionando automáticamente las features con importancia superior a la media.
+        # Esto responde a la petición de no fijar un número bajo de características
+        # y dejar que el modelo elija las más relevantes, descartando las ruidosas.
     }
     
     # Número de combinaciones aleatorias a probar. Es mucho más rápido que GridSearchCV.
-    n_iter_search = 100 
+    n_iter_search = 100
     print(f"RandomizedSearchCV (CatBoost) probará {n_iter_search} combinaciones aleatorias de hiperparámetros.")
     print("Entrenando... (Esto puede tardar varios minutos)\n")
 

@@ -920,20 +920,6 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
     plt.show()
 
     # ==== INTERPRETACIÓN AUTOMÁTICA DEL GAP TRAIN-VALIDACIÓN ====
-    # El gap final indica si hay overfitting:
-    # - Gap pequeño (< 0.05) → Buen balance entre bias y varianza
-    # - Gap grande (> 0.1) → Posible overfitting, el modelo memorizó entrenamiento
-    gap_final = train_mean[-1] - val_mean[-1]
-    print(f"Gap final entre Train y Validación: {gap_final:.4f}")
-    
-    if gap_final < 0.05:
-        print("✓ Gap pequeño: El modelo tiene buen balance (sin overfitting notable)")
-    elif gap_final < 0.10:
-        print("⚠ Gap moderado: Cierto overfitting, pero aceptable")
-    else:
-        print("✗ Gap grande: Overfitting significativo, considera regularización")
-
-    # ==== INTERPRETACIÓN AUTOMÁTICA DEL GAP TRAIN-VALIDACIÓN ====
     # El "gap" (brecha) entre el score de entrenamiento y validación es un indicador
     # clave del estado del modelo:
     # - Gap pequeño (< 0.05) → El modelo generaliza bien, sin overfitting

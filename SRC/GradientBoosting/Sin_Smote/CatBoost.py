@@ -215,6 +215,16 @@ def preprocesar_dataframe_inicial(df):
     float_cols = new_df.select_dtypes(include='float64').columns
     new_df = new_df.round({col: 4 for col in float_cols})
     
+    # --- DATA CLEANING: ELIMINACIÓN DE DUPLICADOS ---
+    # Se identifican filas idénticas. Se reportan los índices antes de eliminarlas.
+    duplicados = new_df[new_df.duplicated()]
+    if not duplicados.empty:
+        print(f"\n[LIMPIEZA] Se detectaron {len(duplicados)} filas duplicadas.")
+        print(f" -> Índices eliminados (originales): {duplicados.index.tolist()}")
+        new_df = new_df.drop_duplicates()
+    else:
+        print("\n[LIMPIEZA] No se encontraron filas duplicadas.")
+
     # 6. Reindexación del DataFrame.
     # Se asigna un nuevo índice secuencial que comienza desde 1.
     new_df.index = range(1, len(new_df) + 1)
@@ -253,6 +263,10 @@ def extraer_features_fila_por_fila(new_df):
     X_calculado = []
     y_calculado = []
     
+    # Contadores para reporte de limpieza
+    count_insufficient = 0
+    count_low_var = 0
+
     print(f"Procesando {len(new_df)} puntos de soldadura (Algoritmo Corregido)...")
 
     for i in new_df.index:
@@ -281,11 +295,26 @@ def extraer_features_fila_por_fila(new_df):
             # Se asegura que todos los arrays (tiempo, voltaje, corriente) tengan la misma longitud
             # para evitar errores en cálculos vectoriales.
             min_len = min(len(t_soldadura), len(raw_volt), len(raw_corr))
-            if min_len < 10: continue # Se omiten soldaduras con muy pocos datos.
+            
+            # --- DATA CLEANING: FILTRADO POR CANTIDAD DE DATOS ---
+            if min_len <= 10: 
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes ({min_len} puntos).")
+                count_insufficient += 1
+                continue 
             
             t_soldadura = t_soldadura[:min_len]
             raw_volt = raw_volt[:min_len]
             raw_corr = raw_corr[:min_len]
+
+            # --- DATA CLEANING: FILTRADO POR VARIANZA (SEÑALES PLANAS) ---
+            # Se valida la varianza en Voltaje e Intensidad para descartar señales constantes o muertas.
+            # Se usa un umbral pequeño (1e-5) para detectar líneas planas.
+            var_volt = np.var(raw_volt)
+            var_corr = np.var(raw_corr)
+            if var_volt < 1e-5 or var_corr < 1e-5:
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal plana detectada (Var V: {var_volt:.6f}, Var I: {var_corr:.6f}).")
+                count_low_var += 1
+                continue
 
             # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
             # Se calcula la resistencia dinámica usando la Ley de Ohm: R(t) = V(t) / I(t).
@@ -477,6 +506,12 @@ def extraer_features_fila_por_fila(new_df):
             print(f"Error en fila {i}: {e}")
             continue
 
+    # --- REPORTE FINAL DE LIMPIEZA ---
+    if count_insufficient == 0:
+        print("[LIMPIEZA] No se encontraron filas con datos insuficientes.")
+    if count_low_var == 0:
+        print("[LIMPIEZA] No se encontraron filas con varianza baja (señales planas).")
+
     print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)
 
@@ -529,7 +564,7 @@ def paso_1_cargar_y_preparar_datos(feature_names):
 
     print("\n--- Resumen de Datos Cargados ---")
     print(f"Total de muestras: {len(X)}")
-    print(f"Distribución de clases (antes de SMOTE):\n{y.value_counts(normalize=True)}")
+    print(f"Distribución de clases:\n{y.value_counts(normalize=True)}")
     print("----------------------------------\n")
     return X, y
 

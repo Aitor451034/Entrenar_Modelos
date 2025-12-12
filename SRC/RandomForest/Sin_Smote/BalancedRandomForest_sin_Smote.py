@@ -212,6 +212,16 @@ def preprocesar_dataframe_inicial(df):
     float_cols = new_df.select_dtypes(include='float64').columns
     new_df = new_df.round({col: 4 for col in float_cols})
     
+    # --- DATA CLEANING: ELIMINACIÓN DE DUPLICADOS ---
+    # Se identifican filas idénticas. Se reportan los índices antes de eliminarlas.
+    duplicados = new_df[new_df.duplicated()]
+    if not duplicados.empty:
+        print(f"\n[LIMPIEZA] Se detectaron {len(duplicados)} filas duplicadas.")
+        print(f" -> Índices eliminados (originales): {duplicados.index.tolist()}")
+        new_df = new_df.drop_duplicates()
+    else:
+        print("\n[LIMPIEZA] No se encontraron filas duplicadas.")
+
     # 6. Reindexación del DataFrame.
     # Se asigna un nuevo índice secuencial que comienza desde 1.
     new_df.index = range(1, len(new_df) + 1)
@@ -250,6 +260,9 @@ def extraer_features_fila_por_fila(new_df):
     X_calculado = []
     y_calculado = []
     
+    # Contadores para reporte de limpieza
+    count_insufficient = 0
+
     print(f"Procesando {len(new_df)} puntos de soldadura (Algoritmo Corregido)...")
 
     for i in new_df.index:
@@ -278,11 +291,52 @@ def extraer_features_fila_por_fila(new_df):
             # Se asegura que todos los arrays (tiempo, voltaje, corriente) tengan la misma longitud
             # para evitar errores en cálculos vectoriales.
             min_len = min(len(t_soldadura), len(raw_volt), len(raw_corr))
-            if min_len < 10: continue # Se omiten soldaduras con muy pocos datos.
+            
+            # --- DATA CLEANING: FILTRADO POR CANTIDAD DE DATOS ---
+            if min_len <= 10: 
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes ({min_len} puntos).")
+                count_insufficient += 1
+                continue 
             
             t_soldadura = t_soldadura[:min_len]
             raw_volt = raw_volt[:min_len]
             raw_corr = raw_corr[:min_len]
+
+            # --- DATA CLEANING: ELIMINACIÓN DE PUNTOS INICIALES ---
+            # Se busca el primer índice donde la INTENSIDAD sea válida.
+            # Solo nos fiamos de la corriente para decidir si ha empezado la soldadura.
+            start_idx = 0
+            
+            # Usamos solo raw_corr para detectar el inicio real del proceso
+            while start_idx < len(raw_corr) and raw_corr[start_idx] < 100:
+                start_idx += 1
+            
+            # Comprobación de seguridad por si toda la soldadura es ruido bajo
+            if start_idx >= len(raw_volt):
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal completa por debajo de 100.")
+                count_insufficient += 1
+                continue
+
+            if start_idx > 0:
+                # [DEBUG] Imprimir mensaje para confirmar que el recorte está ocurriendo
+                print(f"[INFO] Fila {i}: Recortando {start_idx} puntos iniciales (ruido < 100).")
+
+                # Recortar señales
+                raw_volt = raw_volt[start_idx:]
+                raw_corr = raw_corr[start_idx:]
+                
+                # Recortar y resetear tiempo (Mantiene el 'dt' original y pone el inicio en 0)
+                t_soldadura = t_soldadura[start_idx:]
+                t_soldadura = t_soldadura - t_soldadura[0] 
+                
+                # Actualizar Ts2 (feature de duración) al nuevo tiempo efectivo
+                ts2 = t_soldadura[-1]
+                
+                # Verificación final de longitud
+                if len(raw_volt) <= 10:
+                    print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes tras recorte (<10).")
+                    count_insufficient += 1
+                    continue
 
             # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
             # Se calcula la resistencia dinámica usando la Ley de Ohm: R(t) = V(t) / I(t).
@@ -474,9 +528,12 @@ def extraer_features_fila_por_fila(new_df):
             print(f"Error en fila {i}: {e}")
             continue
 
+    # --- REPORTE FINAL DE LIMPIEZA ---
+    if count_insufficient == 0:
+        print("[LIMPIEZA] No se encontraron filas con datos insuficientes.")
+
     print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)
-
 
 # ==============================================================================
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
@@ -526,7 +583,7 @@ def paso_1_cargar_y_preparar_datos(feature_names):
 
     print("\n--- Resumen de Datos Cargados ---")
     print(f"Total de muestras: {len(X)}")
-    print(f"Distribución de clases (antes de SMOTE):\n{y.value_counts(normalize=True)}")
+    print(f"Distribución de clases:\n{y.value_counts(normalize=True)}")
     print("----------------------------------\n")
     return X, y
 

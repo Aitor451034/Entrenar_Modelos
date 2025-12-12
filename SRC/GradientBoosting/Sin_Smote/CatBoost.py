@@ -306,15 +306,38 @@ def extraer_features_fila_por_fila(new_df):
             raw_volt = raw_volt[:min_len]
             raw_corr = raw_corr[:min_len]
 
-            # --- DATA CLEANING: FILTRADO POR VARIANZA (SEÑALES PLANAS) ---
-            # Se valida la varianza en Voltaje e Intensidad para descartar señales constantes o muertas.
-            # Se usa un umbral pequeño (1e-5) para detectar líneas planas.
-            var_volt = np.var(raw_volt)
-            var_corr = np.var(raw_corr)
-            if var_volt < 1e-5 or var_corr < 1e-5:
-                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal plana detectada (Var V: {var_volt:.6f}, Var I: {var_corr:.6f}).")
-                count_low_var += 1
+            # --- DATA CLEANING: ELIMINACIÓN DE PUNTOS INICIALES ---
+            # Se busca el primer índice donde la INTENSIDAD sea válida.
+            # Solo nos fiamos de la corriente para decidir si ha empezado la soldadura.
+            start_idx = 0
+            
+            # Usamos solo raw_corr para detectar el inicio real del proceso
+            while start_idx < len(raw_corr) and raw_corr[start_idx] < 100:
+                start_idx += 1
+            
+            # Comprobación de seguridad por si toda la soldadura es ruido bajo
+            if start_idx >= len(raw_volt):
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal completa por debajo de 100.")
+                count_insufficient += 1
                 continue
+
+            if start_idx > 0:
+                # Recortar señales
+                raw_volt = raw_volt[start_idx:]
+                raw_corr = raw_corr[start_idx:]
+                
+                # Recortar y resetear tiempo (Mantiene el 'dt' original y pone el inicio en 0)
+                t_soldadura = t_soldadura[start_idx:]
+                t_soldadura = t_soldadura - t_soldadura[0] 
+                
+                # Actualizar Ts2 (feature de duración) al nuevo tiempo efectivo
+                ts2 = t_soldadura[-1]
+                
+                # Verificación final de longitud
+                if len(raw_volt) <= 10:
+                    print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes tras recorte (<10).")
+                    count_insufficient += 1
+                    continue
 
             # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
             # Se calcula la resistencia dinámica usando la Ley de Ohm: R(t) = V(t) / I(t).

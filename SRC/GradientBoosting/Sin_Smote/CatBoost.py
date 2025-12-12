@@ -265,7 +265,6 @@ def extraer_features_fila_por_fila(new_df):
     
     # Contadores para reporte de limpieza
     count_insufficient = 0
-    count_low_var = 0
 
     print(f"Procesando {len(new_df)} puntos de soldadura (Algoritmo Corregido)...")
 
@@ -322,6 +321,9 @@ def extraer_features_fila_por_fila(new_df):
                 continue
 
             if start_idx > 0:
+                # [DEBUG] Imprimir mensaje para confirmar que el recorte está ocurriendo
+                print(f"[INFO] Fila {i}: Recortando {start_idx} puntos iniciales (ruido < 100).")
+
                 # Recortar señales
                 raw_volt = raw_volt[start_idx:]
                 raw_corr = raw_corr[start_idx:]
@@ -532,8 +534,6 @@ def extraer_features_fila_por_fila(new_df):
     # --- REPORTE FINAL DE LIMPIEZA ---
     if count_insufficient == 0:
         print("[LIMPIEZA] No se encontraron filas con datos insuficientes.")
-    if count_low_var == 0:
-        print("[LIMPIEZA] No se encontraron filas con varianza baja (señales planas).")
 
     print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)

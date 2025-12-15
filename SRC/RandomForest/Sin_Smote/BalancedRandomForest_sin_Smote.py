@@ -34,7 +34,8 @@ from scipy.stats import skew, kurtosis
 from scipy.signal import find_peaks,savgol_filter #Filtro de Savgol
 
 # --- Componentes de Scikit-learn ---
-from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict
+from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict, RandomizedSearchCV
+from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import StandardScaler
 from imblearn.ensemble import BalancedRandomForestClassifier
 from sklearn.metrics import (
@@ -46,6 +47,10 @@ from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
+from sklearn.ensemble import RandomForestClassifier, IsolationForest # Para detección de outliers
+from sklearn.impute import KNNImputer # Para imputación de valores faltantes
+from sklearn.decomposition import PCA # Para visualización 2D
+from sklearn.impute import SimpleImputer # Para imputación temporal en visualización
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -121,7 +126,7 @@ def calcular_pendiente(resistencias, tiempos):
     """
     # Si no hay suficientes puntos para calcular una pendiente (0 o 1), devuelve una lista con cero.
     if len(resistencias) <= 1 or len(tiempos) <= 1:
-        return [0]
+        return [0.0]
     
     pendientes = []
     # Itera sobre cada par de puntos consecutivos (i, i+1).
@@ -132,8 +137,8 @@ def calcular_pendiente(resistencias, tiempos):
         delta_r = resistencias[i + 1] - resistencias[i]
         
         # Se previene la división por cero si dos puntos tienen el mismo tiempo.
-        if delta_t == 0:
-            pendiente_actual = 0
+        if delta_t == 0.0:
+            pendiente_actual = 0.0
         else:
             # Fórmula de la pendiente: m = ΔR / Δt
             # Se multiplica por 100 para escalar el valor, posiblemente para expresarlo
@@ -156,7 +161,8 @@ def calcular_derivadas(resistencias, tiempos):
     """
     # Si no hay suficientes puntos, no se puede calcular la derivada.
     if len(resistencias) <= 1 or len(tiempos) <= 1:
-        return np.array([0]), np.array([0]), np.array([0])
+        # Devuelve arrays de NaNs si no hay datos suficientes
+        return np.array([np.nan]), np.array([np.nan]), np.array([np.nan])
         
     # --- 1ª Derivada (Velocidad de cambio de la resistencia) ---
     # Fórmula (simplificada para puntos interiores): f'(x) ≈ (f(x+h) - f(x-h)) / 2h
@@ -337,7 +343,13 @@ def extraer_features_fila_por_fila(new_df):
                     print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes tras recorte (<10).")
                     count_insufficient += 1
                     continue
-
+            
+            # Si Intensidad o Voltaje tienen un único valor (varianza 0), eliminamos la fila.
+            if len(np.unique(raw_corr)) <= 1:
+                count_flat_signal += 1; continue
+            if len(np.unique(raw_volt)) <= 1:
+                count_flat_signal += 1; continue
+            
             # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
             # Se calcula la resistencia dinámica usando la Ley de Ohm: R(t) = V(t) / I(t).
             # Se usa np.divide con 'where' para evitar la división por cero si la corriente es muy baja.
@@ -388,9 +400,9 @@ def extraer_features_fila_por_fila(new_df):
             d3 = np.gradient(d2, t_soldadura)
             
             # Característica 22: Máxima curvatura de la señal R(t).
-            max_curvatura = np.max(np.abs(d2))
+            max_curvatura = np.nanmax(np.abs(d2)) if not np.all(np.isnan(d2)) else np.nan
             # Característica 24: Máximo jerk de la señal R(t).
-            max_jerk = np.max(np.abs(d3))
+            max_jerk = np.nanmax(np.abs(d3)) if not np.all(np.isnan(d3)) else np.nan
             # Característica 23: Número de puntos de inflexión. Se cuentan los cruces por cero de la 2ª derivada.
             puntos_inflexion = np.sum(np.diff(np.sign(d2)) != 0)
             
@@ -411,11 +423,11 @@ def extraer_features_fila_por_fila(new_df):
             r_mean = np.mean(r_smooth)
             numerador = np.sum((r_smooth - r_mean) * (t_soldadura - t_mean))
             denominador = np.sum((t_soldadura - t_mean)**2) 
-            m_ols = numerador / denominador if denominador != 0 else 0
+            m_ols = numerador / denominador if denominador != 0 else 0.0
 
             # Característica 11: Pendiente de la curva de voltaje desde su pico hasta el final.
             idx_v_max = np.argmax(raw_volt)
-            pendiente_V = 0
+            pendiente_V = 0.0
             if idx_v_max < len(raw_volt) - 1:
                 dt_v = t_soldadura[idx_v_max] - t_e
                 if dt_v != 0:
@@ -423,11 +435,11 @@ def extraer_features_fila_por_fila(new_df):
 
             # Característica 6 (k3): Pendiente desde el inicio hasta el pico de resistencia.
             # Mide la velocidad de calentamiento inicial. Fórmula: (R_max - R_inicial) / t_R_max
-            k3 = ((resistencia_max - r0) / t_R_max * 100) if t_R_max > 0 else 0
+            k3 = ((resistencia_max - r0) / t_R_max * 100) if t_R_max > 0 else 0.0
             # Característica 5 (k4): Pendiente desde el pico de resistencia hasta el final.
             # Mide la velocidad de enfriamiento o colapso. Fórmula: (R_final - R_max) / (t_final - t_R_max)
             delta_t_post = t_e - t_R_max
-            k4 = ((r_e - resistencia_max) / delta_t_post * 100) if delta_t_post > 0 else 0
+            k4 = ((r_e - resistencia_max) / delta_t_post * 100) if delta_t_post > 0 else 0.0
 
             # Característica 17: Número de puntos con pendiente negativa después del pico de resistencia.
             pendientes_post = d1[idx_max:]
@@ -445,9 +457,9 @@ def extraer_features_fila_por_fila(new_df):
             # Característica 7: Rango intercuartílico (IQR). Mide la dispersión del 50% central de los datos.
             iqr = np.percentile(r_smooth, 75) - np.percentile(r_smooth, 25)
             # Característica 27: Coeficiente de asimetría (Skewness).
-            asim = skew(r_smooth) if len(r_smooth) > 2 else 0
+            asim = skew(r_smooth) if len(r_smooth) > 2 else np.nan
             # Característica 28: Curtosis. Mide qué tan "puntiaguda" es la distribución.
-            curt = kurtosis(r_smooth) if len(r_smooth) > 2 else 0
+            curt = kurtosis(r_smooth) if len(r_smooth) > 2 else np.nan
             
             # --- Características Estadísticas Parciales ---
             # Característica 8: Desviación estándar de la primera mitad temporal de la curva.
@@ -455,7 +467,7 @@ def extraer_features_fila_por_fila(new_df):
             # Característica 16: Desviación estándar de la resistencia antes del pico.
             desv_R = np.std(r_smooth[:idx_max+1])
             # Característica 14: Resistencia media después del pico.
-            r_mean_post_max = np.mean(r_smooth[idx_max:]) if idx_max < len(r_smooth) else 0
+            r_mean_post_max = np.mean(r_smooth[idx_max:]) if idx_max < len(r_smooth) else np.nan
 
             # --- Características basadas en Áreas ---
             # Se calcula el área bajo la curva de R(t) usando la regla del trapecio.
@@ -517,9 +529,20 @@ def extraer_features_fila_por_fila(new_df):
                 float(m_ols)                    # 32. m_min_cuadrados: Pendiente de la regresión lineal de R(t)
             ]
             
-            # Limpieza final de NaNs o Infinitos que pudieran generarse por divisiones por cero
-            # u otros problemas numéricos, reemplazándolos por 0.0.
-            fila_features = np.nan_to_num(fila_features, nan=0.0, posinf=0.0, neginf=0.0)
+            # --- DETECCIÓN DE NaNs ---
+            # Imprimir por pantalla qué características tienen NaN antes de sustituir
+            arr_temp = np.array(fila_features)
+            if np.isnan(arr_temp).any():
+                indices_nan = np.where(np.isnan(arr_temp))[0]
+                print(f"\n[AVISO] Fila {i}: Se encontraron valores NaN en las siguientes características:")
+                for idx in indices_nan:
+                    print(f"   -> {FEATURE_NAMES[idx]}")
+
+            # Limpieza final: Convertir infinitos a NaN y MANTENER los NaNs para el imputador
+            # NOTA: Ya NO reemplazamos NaNs por 0.0 aquí. 
+            # Se mantendrán como NaN para ser imputados por KNN en el pipeline.
+            fila_features = np.array(fila_features)
+            fila_features[np.isinf(fila_features)] = np.nan
             
             X_calculado.append(fila_features)
             y_calculado.append(int(new_df.loc[i, "Etiqueta datos"]))
@@ -534,6 +557,7 @@ def extraer_features_fila_por_fila(new_df):
 
     print("Cálculo de features completado.")
     return np.array(X_calculado), np.array(y_calculado)
+
 
 # ==============================================================================
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
@@ -565,6 +589,79 @@ def graficar_distribucion_energia(X, y):
     except Exception as e:
         print(f"No se pudo generar el gráfico de energía: {e}")
 
+def visualizar_datos_previos(X, y, feature_names):
+    """
+    Visualiza la distribución de los datos mediante PCA (2D) y Boxplots.
+    Permite identificar visualmente outliers y la separabilidad de las clases
+    ANTES de tomar decisiones de eliminación.
+    """
+    print("\n" + "="*70)
+    print("PASO 1.5: VISUALIZACIÓN DE DATOS (PCA y Boxplots)")
+    print("="*70)
+
+    # 1. Estandarización temporal para visualización (PCA y Boxplots requieren misma escala)
+    scaler = StandardScaler()
+    # Manejo de NaNs para visualización: Imputación simple temporal (media)
+    # (Solo para ver los gráficos, no afecta al dataset real que usará KNN después)
+    imputer = SimpleImputer(strategy='mean') 
+    
+    # Pipeline temporal de visualización
+    X_imputed = imputer.fit_transform(X)
+    X_scaled = scaler.fit_transform(X_imputed)
+    
+    # --- GRÁFICO 1: PCA 2D (Mapa de puntos) ---
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    
+    plt.figure(figsize=(10, 6))
+    # Clase 0: Sin Defecto (Verde)
+    plt.scatter(X_pca[y==0, 0], X_pca[y==0, 1], c='green', label='Sin Defecto (0)', alpha=0.5, edgecolors='k', s=50)
+    # Clase 1: Con Defecto (Rojo)
+    plt.scatter(X_pca[y==1, 0], X_pca[y==1, 1], c='red', label='Con Defecto (1)', alpha=0.7, edgecolors='k', marker='^', s=70)
+    
+    plt.title(f'Mapa de Distribución PCA (2D)\nVarianza explicada: {sum(pca.explained_variance_ratio_):.2%}')
+    plt.xlabel(f'Componente Principal 1 ({pca.explained_variance_ratio_[0]:.2%})')
+    plt.ylabel(f'Componente Principal 2 ({pca.explained_variance_ratio_[1]:.2%})')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.show()
+    
+    # --- GRÁFICO 2: BOXPLOTS (Detectar Outliers por variable) ---
+    df_scaled = pd.DataFrame(X_scaled, columns=feature_names)
+    plt.figure(figsize=(12, 10))
+    sns.boxplot(data=df_scaled, orient='h', palette="Set2")
+    plt.title('Distribución de Características Estandarizadas (Z-Scores)')
+    plt.xlabel('Desviaciones Estándar (Puntos > 3 o < -3 suelen ser outliers)')
+    plt.axvline(x=0, color='k', linestyle='--', alpha=0.5)
+    plt.grid(True, axis='x', linestyle=':', alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+    
+    # --- ANÁLISIS DE ANOMALÍAS (ISOLATION FOREST) ---
+    # Responde a tu duda: ¿Cómo detectar outliers sin borrar datos válidos de otros espesores?
+    # Isolation Forest aísla puntos "raros". Si tienes varios espesores (clusters), 
+    # el algoritmo suele respetarlos y solo marca lo que está lejos de CUALQUIER cluster.
+    print("\n--- Análisis de Posibles Outliers (Informativo) ---")
+    print("Identificando los puntos más atípicos matemáticamente (posibles errores de sensor).")
+    print("NOTA: No se eliminarán filas, solo se listan para tu revisión manual.")
+    
+    iso = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
+    iso.fit(X_imputed)
+    scores = iso.decision_function(X_imputed) # Menor score = Más anómalo
+    
+    # Crear un DataFrame temporal para mostrar resultados
+    df_outliers = pd.DataFrame({'Indice_Fila': X.index, 'Clase': y.values, 'Score_Anomalia': scores})
+    
+    # Mostrar los 5 puntos más "raros" de cada clase
+    for clase_val, nombre in [(0, "Sin Defecto (OK)"), (1, "Con Defecto (NOK)")]:
+        print(f"\nTop 5 puntos más anómalos en clase '{nombre}':")
+        # Ordenamos por score ascendente (los más negativos son los más anómalos)
+        top_anomalos = df_outliers[df_outliers['Clase'] == clase_val].sort_values('Score_Anomalia').head(5)
+        for _, row in top_anomalos.iterrows():
+            print(f"  -> Fila {int(row['Indice_Fila'])} | Score: {row['Score_Anomalia']:.4f}")
+
+    print("✓ Gráficos generados. Revisa si hay puntos muy alejados en el PCA o los Boxplots.")
+
 def paso_1_cargar_y_preparar_datos(feature_names):
     """Orquesta la carga de datos y la creación de los DataFrames X e y."""
     df_raw = leer_archivo()
@@ -580,6 +677,24 @@ def paso_1_cargar_y_preparar_datos(feature_names):
     X = pd.DataFrame(X_raw, columns=feature_names)
     X = X.applymap(lambda x: round(x, 4))
     y = pd.Series(y_raw, name="Etiqueta_Defecto")
+
+    print("\n" + "="*70)
+    print("TABLA DE VALORES DE CARACTERÍSTICAS (TODAS LAS FILAS)")
+    print("="*70)
+    with pd.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', 2000):
+        print(X)
+    
+    print("\n" + "="*70)
+    print("VERIFICACIÓN DE NULOS (NaNs)")
+    print("="*70)
+    nulos = X.isnull().sum()
+    if nulos.sum() == 0:
+        print("¡INCREÍBLE! No hay ningún NaN en todo el dataset.")
+        print("La limpieza previa eliminó todas las filas problemáticas.")
+        print("El KNN actuará solo como precaución.")
+    else:
+        print("Se encontraron los siguientes NaNs que el KNN arreglará después:")
+        print(nulos[nulos > 0])
 
     print("\n--- Resumen de Datos Cargados ---")
     print(f"Total de muestras: {len(X)}")
@@ -618,6 +733,10 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     
     pipeline_BRF = ImbPipeline([
         ('scaler', StandardScaler()),           # 1. Escalar
+        
+        # Paso 1.5: Imputación de valores faltantes (KNN)
+        ('imputer', KNNImputer(weights='uniform')),
+        
         ('selector', RFE(           # 2. Seleccionar Features
             RandomForestClassifier(n_estimators=400, random_state=random_state, n_jobs=-1,),
             step=0.1,  # Elimina 1 a 1 (máxima precisión)
@@ -634,6 +753,8 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
 
     # 2. Definir el GRID (Aquí están los controles anti-sobreajuste)
     param_grid_BRF = {
+        # --- Parámetros del Imputador KNN ---
+        'imputer__n_neighbors': [3, 5, 7],   # El modelo probará cuál es el mejor valor
         # --- Balanced Random Forest (Anti-Overfitting) ---
         "model__n_estimators": [200, 300],      # Bastantes árboles para estabilidad
         "model__max_depth": [4, 6, 8],          # <--- ESTO evita el sobreajuste (profundidad baja)
@@ -1040,6 +1161,10 @@ def main():
     # Esto te dirá si el problema es "demasiado fácil" físicamente
     graficar_distribucion_energia(X, y)
     # -------------------------------------
+    
+        # --- NUEVO: VISUALIZACIÓN GLOBAL ---
+    # Ver distribución antes de decidir eliminar nada
+    visualizar_datos_previos(X, y, FEATURE_NAMES)
 
     # PASO 2: Dividir y escalar los datos
     X_train, X_test, y_train, y_test, scaler = paso_2_escalar_y_dividir_datos(

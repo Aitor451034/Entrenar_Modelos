@@ -1436,7 +1436,7 @@ def main():
     
     # --- NUEVO: VISUALIZACIÓN GLOBAL ---
     # Ver distribución antes de decidir eliminar nada
-    visualizar_datos_previos(X, y, FEATURE_NAMES)
+    # visualizar_datos_previos(X, y, FEATURE_NAMES)
     
     # ==========================================================================
     # PASO 2: DIVIDIR DATOS EN TRAIN/TEST Y ESCALAR

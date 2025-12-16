@@ -31,11 +31,11 @@ from tkinter import filedialog
 # --- Funciones científicas y estadísticas ---
 from scipy.signal import find_peaks
 from scipy.stats import skew, kurtosis
-from scipy.signal import find_peaks,savgol_filter #Filtro de Savgol
+from scipy.signal import savgol_filter #Filtro de Savgol
+from scipy.interpolate import PchipInterpolator # Para suavizar curvas
 
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict, RandomizedSearchCV
-from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import StandardScaler
 from imblearn.ensemble import BalancedRandomForestClassifier
 from sklearn.metrics import (
@@ -77,7 +77,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.68
+PRECISION_MINIMA = 0.73
 
 
 # ==============================================================================
@@ -138,16 +138,17 @@ def calcular_pendiente(resistencias, tiempos):
         
         # Se previene la división por cero si dos puntos tienen el mismo tiempo.
         if delta_t == 0.0:
-            pendiente_actual = 0.0
+            # CORRECCIÓN: Si dt=0, la pendiente es infinita/indeterminada.
+            # Usamos NaN para que el KNN lo impute, en vez de 0 (que significaría plano).
+            pendiente_actual = np.nan
         else:
             # Fórmula de la pendiente: m = ΔR / Δt
             # Se multiplica por 100 para escalar el valor, posiblemente para expresarlo
             # en una unidad diferente o para mejorar su peso como característica en el modelo.
             pendiente_actual = (delta_r / delta_t) * 100
             
-        # 1. np.nan_to_num: Asegura que si el cálculo resulta en NaN (Not a Number), se reemplace por 0.
-        # 2. round(..., 2): Redondea el resultado a 2 decimales para estandarizar la salida.
-        pendientes.append(round(np.nan_to_num(pendiente_actual, nan=0), 2))
+        # Eliminamos np.nan_to_num para permitir que los NaNs fluyan hasta el imputador
+        pendientes.append(round(pendiente_actual, 2))
     return pendientes
 
 def calcular_derivadas(resistencias, tiempos):
@@ -180,12 +181,13 @@ def calcular_derivadas(resistencias, tiempos):
     # Representa el "jerk" o la tasa de cambio de la aceleración.
     tercera_derivada = np.gradient(segunda_derivada, tiempos)
     
-    # Se devuelven las tres derivadas, reemplazando cualquier posible valor NaN (Not a Number) por 0.
-    return (
-        np.nan_to_num(primera_derivada, nan=0),
-        np.nan_to_num(segunda_derivada, nan=0),
-        np.nan_to_num(tercera_derivada, nan=0)
-    )
+    # CORRECCIÓN: Devolvemos las derivadas tal cual (con NaNs si existen).
+    # Razón: Si la señal es plana, np.gradient ya devuelve 0.0 correctamente.
+    # Si devuelve NaN, es un dato faltante que el KNNImputer del pipeline debe rellenar.
+    # Forzar a 0 confundiría "falta de datos" con "estabilidad perfecta".
+    
+    # Nota: Los 'Inf' (infinitos) se convertirán a NaN en la limpieza final de 'extraer_features'.
+    return primera_derivada, segunda_derivada, tercera_derivada
 
 def preprocesar_dataframe_inicial(df):
     """
@@ -197,6 +199,12 @@ def preprocesar_dataframe_inicial(df):
     # 1. Selección de columnas específicas por índice.
     # Se eligen las columnas que contienen la información necesaria para el análisis.
     # Los índices [0, 8, 9, 10, 20, 27, 67, 98] corresponden a:
+    
+    # [ROBUSTEZ] Verificamos que el DF tenga suficientes columnas antes de hacer iloc
+    if df.shape[1] < 99:
+        print(f"[ERROR CRÍTICO] El CSV tiene {df.shape[1]} columnas, se esperaban al menos 99.")
+        return None
+
     # id punto, Ns, Corrientes inst., Voltajes inst., KAI2, Ts2, Fuerza, Etiqueta datos.
     new_df = df.iloc[:, [0, 8, 9, 10, 20, 27, 67, 98]]
     
@@ -298,7 +306,7 @@ def extraer_features_fila_por_fila(new_df):
             # para evitar errores en cálculos vectoriales.
             min_len = min(len(t_soldadura), len(raw_volt), len(raw_corr))
             
-            # --- DATA CLEANING: FILTRADO POR CANTIDAD DE DATOS ---
+            # --- DATA CLEANING: FILTRADO POR CANTIDAD DE DATOS ---#
             if min_len <= 10: 
                 print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes ({min_len} puntos).")
                 count_insufficient += 1
@@ -338,17 +346,17 @@ def extraer_features_fila_por_fila(new_df):
                 # Actualizar Ts2 (feature de duración) al nuevo tiempo efectivo
                 ts2 = t_soldadura[-1]
                 
-                # Verificación final de longitud
+                # Verificación final de longitud, punto con un tiempo menor a 25 ms se descarta por los pocos puntos que presenta, menor a 10.
                 if len(raw_volt) <= 10:
                     print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes tras recorte (<10).")
                     count_insufficient += 1
                     continue
             
             # Si Intensidad o Voltaje tienen un único valor (varianza 0), eliminamos la fila.
-            if len(np.unique(raw_corr)) <= 1:
-                count_flat_signal += 1; continue
-            if len(np.unique(raw_volt)) <= 1:
-                count_flat_signal += 1; continue
+            # Nota: count_flat_signal no estaba inicializado en el código original, lo corregimos a un print
+            if len(np.unique(raw_corr)) <= 1 or len(np.unique(raw_volt)) <= 1:
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal plana (varianza 0).")
+                continue
             
             # --- 2. CÁLCULO DE RESISTENCIA (FILTRADO) ---
             # Se calcula la resistencia dinámica usando la Ley de Ohm: R(t) = V(t) / I(t).
@@ -366,11 +374,29 @@ def extraer_features_fila_por_fila(new_df):
 
             # --- 3. EXTRACCIÓN DE PUNTOS CLAVE ---
             # Se identifican los puntos más importantes de la curva de resistencia suavizada.
-            idx_max = np.argmax(r_smooth) # Índice del valor máximo de resistencia.
+            
+            # Identificar pico Beta real (calentamiento) tras la caída inicial.
+            valles_temp, _ = find_peaks(-r_smooth)
+            if len(valles_temp) > 0:
+                idx_valley_start = valles_temp[0] # Primer valle (fin caída contacto)
+            else:
+                idx_valley_start = 0
+            
+            # Buscar máximo (Beta) solo después del valle inicial
+            if idx_valley_start < len(r_smooth) - 1:
+                idx_max_rel = np.argmax(r_smooth[idx_valley_start:])
+                idx_max = idx_valley_start + idx_max_rel
+            else:
+                idx_max = np.argmax(r_smooth)
+
             idx_min = np.argmin(r_smooth) # Índice del valor mínimo de resistencia.
             
             resistencia_max = r_smooth[idx_max] # Valor máximo de resistencia (Beta).
             t_R_max = t_soldadura[idx_max]      # Tiempo en el que ocurre el máximo.
+            
+            # Valores en el valle (inicio de la subida K3)
+            r_valley_start = r_smooth[idx_valley_start]
+            t_valley_start = t_soldadura[idx_valley_start]
             
             r0 = r_smooth[0]      # Resistencia inicial (Alfa).
             r_e = r_smooth[-1]    # Resistencia final.
@@ -378,7 +404,7 @@ def extraer_features_fila_por_fila(new_df):
             resistencia_min = np.min(r_smooth) # Valor mínimo de resistencia.
             t_min = t_soldadura[idx_min]       # Tiempo en el que ocurre el mínimo.
 
-            # --- 4. CÁLCULO DE ENERGÍA (CORREGIDO) ---
+            # --- 4. CÁLCULO DE ENERGÍA ---
             # Se calcula la energía total disipada durante la soldadura en Joules.
             # Fórmula: Energía (Q) = ∫ P(t) dt = ∫ V(t) * I(t) dt
             # Se convierten las unidades a estándar (Amperios, Voltios, Segundos).
@@ -388,7 +414,7 @@ def extraer_features_fila_por_fila(new_df):
             
             potencia = v_reales * i_amperios # Potencia instantánea P(t) = V(t) * I(t).
             # Se integra la potencia respecto al tiempo usando la regla del trapecio.
-            q_joules = np.trapz(potencia, x=t_segundos)
+            q_joules = np.trapezoid(potencia, x=t_segundos)
 
             # --- 5. DERIVADAS Y EVENTOS FÍSICOS ---
             # Se calculan las derivadas de la curva de resistencia suavizada para analizar su dinámica.
@@ -423,23 +449,52 @@ def extraer_features_fila_por_fila(new_df):
             r_mean = np.mean(r_smooth)
             numerador = np.sum((r_smooth - r_mean) * (t_soldadura - t_mean))
             denominador = np.sum((t_soldadura - t_mean)**2) 
-            m_ols = numerador / denominador if denominador != 0 else 0.0
+            # Si denominador es 0 (solo 1 punto de tiempo), la pendiente es indeterminada -> NaN
+            m_ols = numerador / denominador if denominador != 0 else np.nan
 
             # Característica 11: Pendiente de la curva de voltaje desde su pico hasta el final.
             idx_v_max = np.argmax(raw_volt)
-            pendiente_V = 0.0
+            
             if idx_v_max < len(raw_volt) - 1:
                 dt_v = t_soldadura[idx_v_max] - t_e
                 if dt_v != 0:
                      pendiente_V = (raw_volt[idx_v_max] - raw_volt[-1]) / dt_v
+                else:
+                     pendiente_V = 0.0
+            else:
+                # Si el pico está al final, no hubo caída de voltaje (posible defecto).
+                # Asignamos 0.0 para indicar "sin pendiente" en lugar de NaN.
+                pendiente_V = 0.0
 
-            # Característica 6 (k3): Pendiente desde el inicio hasta el pico de resistencia.
-            # Mide la velocidad de calentamiento inicial. Fórmula: (R_max - R_inicial) / t_R_max
-            k3 = ((resistencia_max - r0) / t_R_max * 100) if t_R_max > 0 else 0.0
+            # Característica 6 (k3): Pendiente de subida (calentamiento).
+            # Se calcula desde el valle inicial (R_alfa efectivo) hasta el pico Beta.
+            # REGLA FÍSICA: t_beta - t_alfa > 0. Si es negativo, es un error de cálculo -> NaN.
+            # Para este caso el valor de pendiente calculado tiene que ser positivo
+            dt_rise = t_R_max - t_valley_start
+            if dt_rise > 0:
+                k3 = (resistencia_max - r_valley_start) / dt_rise * 100
+                # Si k3 <= 0, significa que no hubo subida real (posible defecto).
+                # Mantenemos el valor para que el modelo detecte la anomalía.
+            else:
+                # Si no hay tiempo de subida (pico antes o en el valle), no hubo fase de calentamiento.
+                # Asignamos 0.0 para indicar ausencia de pendiente.
+                k3 = 0.0
+            
             # Característica 5 (k4): Pendiente desde el pico de resistencia hasta el final.
             # Mide la velocidad de enfriamiento o colapso. Fórmula: (R_final - R_max) / (t_final - t_R_max)
+            # REGLA FÍSICA: t_e - t_beta > 0. Si es negativo, es un error de cálculo -> NaN
+            # El valor de pendiente calculado debe ser negativo
             delta_t_post = t_e - t_R_max
-            k4 = ((r_e - resistencia_max) / delta_t_post * 100) if delta_t_post > 0 else 0.0
+            if delta_t_post > 0:
+                k4 = ((r_e - resistencia_max) / delta_t_post * 100)
+                # [CORRECCIÓN] Si k4 >= 0 (pendiente positiva/plana), NO poner NaN.
+                # Un valor positivo indica que NO hubo enfriamiento correcto (posible defecto).
+                # Dejar el valor real permite al modelo aprender que "k4 >= 0" -> "Defecto".
+                # Si usamos KNN aquí, disfrazaríamos el defecto con valores de soldaduras sanas.
+            else:
+                # Si el pico está al final, no hubo fase de enfriamiento observable.
+                # Asignamos 0.0 (plano) para indicar explícitamente esta anomalía física.
+                k4 = 0.0
 
             # Característica 17: Número de puntos con pendiente negativa después del pico de resistencia.
             pendientes_post = d1[idx_max:]
@@ -472,10 +527,10 @@ def extraer_features_fila_por_fila(new_df):
             # --- Características basadas en Áreas ---
             # Se calcula el área bajo la curva de R(t) usando la regla del trapecio.
             # Característica 19: Área total bajo la curva R(t).
-            area_total = np.trapz(r_smooth, t_soldadura)
+            area_total = np.trapezoid(r_smooth, t_soldadura)
             idx_mitad = len(t_soldadura) // 2
             # Característica 20: Área en la primera mitad del tiempo.
-            area_pre_mitad = np.trapz(r_smooth[:idx_mitad], t_soldadura[:idx_mitad])
+            area_pre_mitad = np.trapezoid(r_smooth[:idx_mitad], t_soldadura[:idx_mitad])
             # Característica 21: Área en la segunda mitad del tiempo.
             area_post_mitad = area_total - area_pre_mitad
             
@@ -638,7 +693,7 @@ def visualizar_datos_previos(X, y, feature_names):
     plt.show()
     
     # --- ANÁLISIS DE ANOMALÍAS (ISOLATION FOREST) ---
-    # Responde a tu duda: ¿Cómo detectar outliers sin borrar datos válidos de otros espesores?
+    # ¿Cómo detectar outliers sin borrar datos válidos de otros espesores?
     # Isolation Forest aísla puntos "raros". Si tienes varios espesores (clusters), 
     # el algoritmo suele respetarlos y solo marca lo que está lejos de CUALQUIER cluster.
     print("\n--- Análisis de Posibles Outliers (Informativo) ---")
@@ -668,6 +723,9 @@ def paso_1_cargar_y_preparar_datos(feature_names):
     if df_raw is None:
         return None, None
     df_preprocesado = preprocesar_dataframe_inicial(df_raw)
+    if df_preprocesado is None:
+        return None, None
+        
     X_raw, y_raw = extraer_features_fila_por_fila(df_preprocesado)
     
     if X_raw.size == 0:
@@ -714,13 +772,11 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     )
     print("Datos divididos en Train y Test (sin escalar ni filtrar aún).")
     
-    # Devolvemos None en lugar del scaler para no romper la estructura del main, 
-    # aunque ya no se use aquí.
-    return X_train, X_test, y_train, y_test,None
+    return X_train, X_test, y_train, y_test
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF) ***
+    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF + KNN) ***
     """
     print("Iniciando búsqueda de hiperparámetros para Balanced RandomForest...")
     
@@ -734,7 +790,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     pipeline_BRF = ImbPipeline([
         ('scaler', StandardScaler()),           # 1. Escalar
         
-        # Paso 1.5: Imputación de valores faltantes (KNN)
+        # Imputación de valores faltantes (KNN)
         ('imputer', KNNImputer(weights='uniform')),
         
         ('selector', RFE(           # 2. Seleccionar Features
@@ -951,14 +1007,30 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     fpr, tpr, _ = metrics.roc_curve(y_test, predicciones_test_proba)
     auc_score = metrics.roc_auc_score(y_test, predicciones_test_proba)
     
+    # --- SUAVIZADO VISUAL (Interpolación) ---
+    # Agrupar por FPR y tomar el máximo TPR para evitar escalones verticales
+    # y asegurar una función inyectiva para la interpolación.
+    df_roc = pd.DataFrame({'fpr': fpr, 'tpr': tpr})
+    df_roc_unique = df_roc.groupby('fpr')['tpr'].max().reset_index()
+    fpr_clean = df_roc_unique['fpr'].values
+    tpr_clean = df_roc_unique['tpr'].values
+
+    # Generar puntos suaves e interpolar
+    fpr_smooth = np.linspace(0, 1, 300)
+    if len(fpr_clean) > 3:
+        interpolator = PchipInterpolator(fpr_clean, tpr_clean)
+        tpr_smooth = interpolator(fpr_smooth)
+    else:
+        tpr_smooth = np.interp(fpr_smooth, fpr_clean, tpr_clean)
+
     plt.figure()
-    plt.plot(fpr, tpr, label=f"Balanced RandomForest (AUC = {auc_score:.4f})")
+    plt.plot(fpr_smooth, tpr_smooth, label=f"Balanced RandomForest (AUC = {auc_score:.4f})", linewidth=2)
     plt.plot([0, 1], [0, 1], 'k--', label="Clasificador Aleatorio (AUC = 0.5)")
     plt.xlabel('Tasa de Falsos Positivos (FPR)')
     plt.ylabel('Tasa de Verdaderos Positivos (TPR)')
-    plt.title('Curva ROC (Test Set)')
+    plt.title('Curva ROC Suavizada (Test Set)')
     plt.legend(loc='lower right')
-    plt.grid()
+    plt.grid(alpha=0.4)
     plt.show()
 
     # ==========================================================================
@@ -1027,7 +1099,7 @@ def _plot_confusion_matrix(cm, title):
     plt.xlabel('Predicción')
     plt.show()
     
-def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
+def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric):
     """
     Genera la curva de aprendizaje para visualizar Bias y Varianza.
     
@@ -1046,7 +1118,7 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
     X : DataFrame de características (usamos training set)
     y : Series de etiquetas (usamos training set)
     cv : Objeto StratifiedKFold para validación cruzada
-    scoring_metric : Métrica a evaluar (f1, recall, precision, etc.)
+    scoring_metric : Métrica a evaluar (F2 Score, etc.)
     """
     print("\nGenerando Curvas de Aprendizaje...")
     
@@ -1090,7 +1162,7 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric='f1'):
     plt.fill_between(train_sizes, val_mean - val_std, val_mean + val_std, alpha=0.1, color="g")
 
     # Configuración del gráfico
-    plt.title(f"Curva de Aprendizaje (Bias vs Varianza) - {scoring_metric}")
+    plt.title("Curva de Aprendizaje (Bias vs Varianza) - F2 Score")
     plt.xlabel("Tamaño del Set de Entrenamiento (muestras)")
     plt.ylabel("Score (0 a 1)")
     plt.legend(loc="best")
@@ -1167,7 +1239,7 @@ def main():
     visualizar_datos_previos(X, y, FEATURE_NAMES)
 
     # PASO 2: Dividir y escalar los datos
-    X_train, X_test, y_train, y_test, scaler = paso_2_escalar_y_dividir_datos(
+    X_train, X_test, y_train, y_test = paso_2_escalar_y_dividir_datos(
         X, y, TEST_SIZE_RATIO, RANDOM_STATE_SEED
     )
 
@@ -1190,7 +1262,7 @@ def main():
 
     # PASO 6: Evaluación final (Reporte, CM, ROC, Errores) y Guardado
     paso_6_evaluacion_final_y_guardado(
-        mejor_modelo, X_test, y_test, scaler, optimal_threshold, FEATURE_NAMES
+        mejor_modelo, X_test, y_test, None, optimal_threshold, FEATURE_NAMES
     )
     
      # ==========================================================================

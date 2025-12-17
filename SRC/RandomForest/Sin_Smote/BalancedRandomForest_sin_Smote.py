@@ -794,8 +794,11 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         ('imputer', KNNImputer(weights='uniform')),
         
         ('selector', RFE(           # 2. Seleccionar Features
+            # RFE con RandomForest es ideal para inputs numéricos y target categórico.
+            # El árbol encuentra "cortes" (thresholds) óptimos en los valores numéricos
+            # para separar las clases, capturando relaciones no lineales que otros no verian.
             RandomForestClassifier(n_estimators=400, random_state=random_state, n_jobs=-1,),
-            step=0.1,  # Elimina 1 a 1 (máxima precisión)
+            step=0.1,  # Elimina el 10% de features en cada paso (más rápido que 1 a 1)
             verbose=0
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
@@ -866,10 +869,6 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     }).sort_values(by='importancia', ascending=True)
 
     print(f"\nImportancia de las {len(df_importancias)} características seleccionadas:")
-    print(df_importancias.sort_values(by='importancia', ascending=False))
-
-    # *** CORRECCIÓN ***: Título del print
-    print("\nImportancia de las 32 características (features) para el modelo Balanced RandomForest:")
     print(df_importancias.sort_values(by='importancia', ascending=False))
 
     fig, ax = plt.subplots(figsize=(10, 8))

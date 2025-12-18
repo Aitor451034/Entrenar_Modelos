@@ -8,7 +8,7 @@ El proceso incluye:
 1.  Carga de datos y extracción de 32 características (feature engineering).
 2.  Separación de datos en entrenamiento (Train) y prueba (Test).
 3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
-    a. Escala los datos (StandardScaler).
+    a. Escala los datos (StandardScaler) - Necesario para el imputador KNN.
     b. Realiza selección de características (RFE con RandomForest).
     c. Entrena un modelo BalancedRandomForestClassifier.
 4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
@@ -322,18 +322,18 @@ def extraer_features_fila_por_fila(new_df):
             start_idx = 0
             
             # Usamos solo raw_corr para detectar el inicio real del proceso
-            while start_idx < len(raw_corr) and raw_corr[start_idx] < 100:
+            while start_idx < len(raw_corr) and raw_corr[start_idx] < 150:
                 start_idx += 1
             
             # Comprobación de seguridad por si toda la soldadura es ruido bajo
             if start_idx >= len(raw_volt):
-                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal completa por debajo de 100.")
+                print(f"[LIMPIEZA] Fila {i} ELIMINADA: Señal completa por debajo de 150.")
                 count_insufficient += 1
                 continue
 
             if start_idx > 0:
                 # [DEBUG] Imprimir mensaje para confirmar que el recorte está ocurriendo
-                print(f"[INFO] Fila {i}: Recortando {start_idx} puntos iniciales (ruido < 100).")
+                print(f"[INFO] Fila {i}: Recortando {start_idx} puntos iniciales (ruido < 150).")
 
                 # Recortar señales
                 raw_volt = raw_volt[start_idx:]
@@ -788,18 +788,18 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     # lo instanciamos directamente dentro del pipeline para evitar confusiones.
     
     pipeline_BRF = ImbPipeline([
-        ('scaler', StandardScaler()),           # 1. Escalar
+        # 1. Escalar: Aunque RandomForest no lo necesita estrictamente, 
+        # KNNImputer SÍ lo requiere para calcular distancias correctamente.
+        ('scaler', StandardScaler()),
         
         # Imputación de valores faltantes (KNN)
         ('imputer', KNNImputer(weights='uniform')),
         
-        ('selector', RFE(           # 2. Seleccionar Features
-            # RFE con RandomForest es ideal para inputs numéricos y target categórico.
-            # El árbol encuentra "cortes" (thresholds) óptimos en los valores numéricos
-            # para separar las clases, capturando relaciones no lineales que otros no verian.
-            RandomForestClassifier(n_estimators=400, random_state=random_state, n_jobs=-1,),
-            step=0.1,  # Elimina el 10% de features en cada paso (más rápido que 1 a 1)
-            verbose=0
+        ('selector', SelectFromModel( # 2. Seleccionar Features (Método Intrínseco/Supervisado)
+            # SelectFromModel es mucho más rápido que RFE. Entrena un RF una sola vez
+            # y selecciona las variables cuya importancia supera el umbral (threshold).
+            # No limita a un número fijo, sino a la "calidad" de la información.
+            estimator=RandomForestClassifier(n_estimators=200, random_state=random_state, n_jobs=-1)
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,
@@ -816,11 +816,15 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         'imputer__n_neighbors': [3, 5, 7],   # El modelo probará cuál es el mejor valor
         # --- Balanced Random Forest (Anti-Overfitting) ---
         "model__n_estimators": [200, 300],      # Bastantes árboles para estabilidad
-        "model__max_depth": [4, 6, 8],          # <--- ESTO evita el sobreajuste (profundidad baja)
-        "model__min_samples_leaf": [5, 10],     # <--- ESTO obliga a generalizar (grupos grandes)
+        "model__max_depth": [6, 8, 10],          # <--- ESTO evita el sobreajuste (profundidad baja)
+        "model__min_samples_leaf": [5, 10, 15],     # <--- ESTO obliga a generalizar (grupos grandes)
         "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
-        'selector__n_features_to_select': [15 ,20 ,25]              # --- Parámetros del Selector ---#
+        # --- Parámetros del Selector (Dinámico) ---
+        # "mean": Selecciona features con importancia > a la media.
+        # "median": Selecciona el top 50%.
+        # "0.5*mean": Más permisivo, deja pasar features con al menos la mitad de la importancia media.
+        'selector__threshold': ["mean", "median", "0.5*mean"]
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_BRF.values()])

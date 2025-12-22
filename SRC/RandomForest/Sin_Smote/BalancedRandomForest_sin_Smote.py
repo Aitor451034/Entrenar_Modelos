@@ -8,7 +8,7 @@ El proceso incluye:
 1.  Carga de datos y extracción de 32 características (feature engineering).
 2.  Separación de datos en entrenamiento (Train) y prueba (Test).
 3.  Definición de un pipeline de Imbalanced-learn (ImbPipeline) que:
-    a. Escala los datos (StandardScaler) - Necesario para el imputador KNN.
+    a. Escala los datos (StandardScaler).
     b. Realiza selección de características (RFE con RandomForest).
     c. Entrena un modelo BalancedRandomForestClassifier.
 4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
@@ -36,7 +36,7 @@ from scipy.interpolate import PchipInterpolator # Para suavizar curvas
 
 # --- Componentes de Scikit-learn ---
 from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict, RandomizedSearchCV
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler, PowerTransformer
 from imblearn.ensemble import BalancedRandomForestClassifier
 from sklearn.metrics import (
     auc, fbeta_score, make_scorer, classification_report, confusion_matrix,
@@ -48,14 +48,12 @@ from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
 from sklearn.ensemble import RandomForestClassifier, IsolationForest # Para detección de outliers
-from sklearn.impute import KNNImputer # Para imputación de valores faltantes
 from sklearn.decomposition import PCA # Para visualización 2D
+from sklearn.base import BaseEstimator, TransformerMixin # Para crear el filtro de correlación
 from sklearn.impute import SimpleImputer # Para imputación temporal en visualización
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE
-
 
 # ==============================================================================
 # 2. CONSTANTES Y CONFIGURACIÓN
@@ -77,7 +75,7 @@ RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
 FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.73
+PRECISION_MINIMA = 0.77
 
 
 # ==============================================================================
@@ -307,7 +305,7 @@ def extraer_features_fila_por_fila(new_df):
             min_len = min(len(t_soldadura), len(raw_volt), len(raw_corr))
             
             # --- DATA CLEANING: FILTRADO POR CANTIDAD DE DATOS ---#
-            if min_len <= 10: 
+            if min_len < 10: 
                 print(f"[LIMPIEZA] Fila {i} ELIMINADA: Datos insuficientes ({min_len} puntos).")
                 count_insufficient += 1
                 continue 
@@ -615,6 +613,59 @@ def extraer_features_fila_por_fila(new_df):
 
 
 # ==============================================================================
+# CLASE PERSONALIZADA: FILTRO DE CORRELACIÓN
+# ==============================================================================
+class DropHighCorrelationFeatures(BaseEstimator, TransformerMixin):
+    """
+    Transformer que elimina características con una correlación absoluta mayor
+    a un umbral especificado (colinealidad).
+    """
+    def __init__(self, threshold=0.95, feature_names=None):
+        self.threshold = threshold
+        self.feature_names = feature_names
+        self.to_drop_indices_ = []
+        self.dropped_details_ = []
+        self.n_features_in_ = 0
+
+    def fit(self, X, y=None):
+        self.n_features_in_ = X.shape[1]
+        # Convertir a DataFrame para facilitar el cálculo de correlación
+        df = pd.DataFrame(X)
+        corr_matrix = df.corr().abs()
+        self.dropped_details_ = []
+        
+        # Seleccionar el triángulo superior de la matriz de correlación
+        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+        
+        # Identificar columnas con correlación mayor al umbral
+        self.to_drop_indices_ = [column for column in upper.columns if any(upper[column] > self.threshold)]
+        
+        # Guardar detalles para reporte posterior (sin imprimir ahora)
+        for idx in self.to_drop_indices_:
+            # Buscar con qué variable tiene correlación
+            col_values = upper[idx]
+            matches = col_values[col_values > self.threshold]
+            
+            if not matches.empty:
+                kept_idx = matches.index[0]
+                score = matches.iloc[0]
+                self.dropped_details_.append({
+                    'dropped_idx': idx,
+                    'kept_idx': kept_idx,
+                    'score': score
+                })
+        
+        return self
+
+    def transform(self, X):
+        return np.delete(X, self.to_drop_indices_, axis=1)
+        
+    def get_support(self):
+        mask = np.ones(self.n_features_in_, dtype=bool)
+        mask[self.to_drop_indices_] = False
+        return mask
+
+# ==============================================================================
 # 4. FUNCIONES DEL PIPELINE DE MACHINE LEARNING
 # ==============================================================================
 
@@ -749,9 +800,9 @@ def paso_1_cargar_y_preparar_datos(feature_names):
     if nulos.sum() == 0:
         print("¡INCREÍBLE! No hay ningún NaN en todo el dataset.")
         print("La limpieza previa eliminó todas las filas problemáticas.")
-        print("El KNN actuará solo como precaución.")
+        print("Listo para entrenamiento sin imputación.")
     else:
-        print("Se encontraron los siguientes NaNs que el KNN arreglará después:")
+        print("¡ADVERTENCIA! Se encontraron NaNs, pero se eliminó el imputador. Esto podría causar errores:")
         print(nulos[nulos > 0])
 
     print("\n--- Resumen de Datos Cargados ---")
@@ -776,7 +827,7 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF + KNN) ***
+    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF) ***
     """
     print("Iniciando búsqueda de hiperparámetros para Balanced RandomForest...")
     
@@ -788,18 +839,23 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     # lo instanciamos directamente dentro del pipeline para evitar confusiones.
     
     pipeline_BRF = ImbPipeline([
-        # 1. Escalar: Aunque RandomForest no lo necesita estrictamente, 
-        # KNNImputer SÍ lo requiere para calcular distancias correctamente.
-        ('scaler', StandardScaler()),
+        # 1. Transformación de Potencia (Gaussianización)
+        # Brownlee (Cap. 20): Estabiliza varianza y hace distribuciones más normales.
+        # 'yeo-johnson' busca automáticamente el mejor Lambda. standardize=False para usar RobustScaler.
+        ('power', PowerTransformer(method='yeo-johnson', standardize=False)),
         
-        # Imputación de valores faltantes (KNN)
-        ('imputer', KNNImputer(weights='uniform')),
+        # 2. Escalar: Ayuda a la convergencia y visualización.
+        ('scaler', RobustScaler()),
         
-        ('selector', SelectFromModel( # 2. Seleccionar Features (Método Intrínseco/Supervisado)
-            # SelectFromModel es mucho más rápido que RFE. Entrena un RF una sola vez
-            # y selecciona las variables cuya importancia supera el umbral (threshold).
-            # No limita a un número fijo, sino a la "calidad" de la información.
-            estimator=RandomForestClassifier(n_estimators=200, random_state=random_state, n_jobs=-1)
+        # --- NUEVO: Filtro de Correlación (Reducción de Redundancia) ---
+        ('corr_filter', DropHighCorrelationFeatures(threshold=0.95, feature_names=FEATURE_NAMES)),
+        
+        ('selector', RFE( # 2. Seleccionar Features (Método Intrínseco/Supervisado)
+            # RFE (Recursive Feature Elimination) elimina recursivamente las características
+            # menos importantes. Aquí configuramos step=0.1 para eliminar el 10% en cada iteración,
+            # lo cual es más rápido que eliminar una por una.
+            estimator=RandomForestClassifier(n_estimators=400, random_state=random_state, n_jobs=-1),
+            step=0.1 # Elimina el 10% de features en cada paso
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,
@@ -812,19 +868,14 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
 
     # 2. Definir el GRID (Aquí están los controles anti-sobreajuste)
     param_grid_BRF = {
-        # --- Parámetros del Imputador KNN ---
-        'imputer__n_neighbors': [3, 5, 7],   # El modelo probará cuál es el mejor valor
         # --- Balanced Random Forest (Anti-Overfitting) ---
-        "model__n_estimators": [200, 300],      # Bastantes árboles para estabilidad
+        "model__n_estimators": [200,300, 500],      # Bastantes árboles para estabilidad
         "model__max_depth": [6, 8, 10],          # <--- ESTO evita el sobreajuste (profundidad baja)
         "model__min_samples_leaf": [5, 10, 15],     # <--- ESTO obliga a generalizar (grupos grandes)
         "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
         # --- Parámetros del Selector (Dinámico) ---
-        # "mean": Selecciona features con importancia > a la media.
-        # "median": Selecciona el top 50%.
-        # "0.5*mean": Más permisivo, deja pasar features con al menos la mitad de la importancia media.
-        'selector__threshold': ["mean", "median", "0.5*mean"]
+        'selector__n_features_to_select': [10,15]
     }
     
     total_combinaciones = np.prod([len(v) for v in param_grid_BRF.values()])
@@ -856,12 +907,36 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     Grafica la importancia de características y la matriz de confusión
     con el umbral por defecto (0.5).
     """
-   # --- 1. Recuperar nombres correctos tras la selección ---
+    # --- 0. Reporte de Eliminación por Correlación (NUEVO) ---
+    corr_filter = mejor_modelo.named_steps['corr_filter']
+    
+    if hasattr(corr_filter, 'dropped_details_') and corr_filter.dropped_details_:
+        print(f"\n[REPORTE FINAL] Características eliminadas por Alta Correlación (> {corr_filter.threshold}):")
+        for detail in corr_filter.dropped_details_:
+            idx = detail['dropped_idx']
+            kept_idx = detail['kept_idx']
+            score = detail['score']
+            
+            name_dropped = feature_names[idx] if feature_names else str(idx)
+            name_kept = feature_names[kept_idx] if feature_names else str(kept_idx)
+            
+            print(f"  -> Eliminada '{name_dropped}' (Corr {score:.4f} con '{name_kept}')")
+    else:
+        print("\n[REPORTE FINAL] No se eliminaron características por correlación en el modelo final.")
+
+    # --- 1. Recuperar nombres correctos tras la selección ---
+    
+    # A) Aplicar máscara del Filtro de Correlación
+    corr_filter = mejor_modelo.named_steps['corr_filter']
+    mask_corr = corr_filter.get_support()
+    feature_names_post_corr = np.array(feature_names)[mask_corr]
+    
+    # B) Aplicar máscara del Selector RFE (sobre las que quedaron)
     selector = mejor_modelo.named_steps['selector']
-    mask = selector.get_support()
+    mask_rfe = selector.get_support()
     
     # Filtramos los nombres de las 32 columnas originales
-    nombres_finales = np.array(feature_names)[mask]
+    nombres_finales = feature_names_post_corr[mask_rfe]
     
     # Obtenemos importancias del modelo
     importancias = mejor_modelo.named_steps['model'].feature_importances_

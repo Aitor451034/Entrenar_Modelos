@@ -11,7 +11,7 @@ El proceso incluye:
     a. Escala los datos (StandardScaler).
     b. Realiza selección de características (RFE con RandomForest).
     c. Entrena un modelo BalancedRandomForestClassifier.
-4.  Búsqueda exhaustiva de hiperparámetros (GridSearchCV) en el pipeline.
+4.  Búsqueda aleatoria de hiperparámetros (RandomizedSearchCV) en el pipeline.
 5.  Optimización del umbral de decisión basado en una precisión mínima.
 6.  Evaluación final y análisis de errores en el conjunto de prueba (Test set).
 7.  Guardado del pipeline completo (Scaler + Selector + Modelo) y el umbral.
@@ -30,7 +30,7 @@ from tkinter import filedialog
 
 # --- Funciones científicas y estadísticas ---
 from scipy.signal import find_peaks
-from scipy.stats import skew, kurtosis
+from scipy.stats import skew, kurtosis, randint
 from scipy.signal import savgol_filter #Filtro de Savgol
 from scipy.interpolate import PchipInterpolator # Para suavizar curvas
 
@@ -839,13 +839,14 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     # lo instanciamos directamente dentro del pipeline para evitar confusiones.
     
     pipeline_BRF = ImbPipeline([
-        # 1. Transformación de Potencia (Gaussianización)
+        
+        # 1. Escalar: Ayuda a la convergencia y visualización.
+        ('scaler', RobustScaler()),
+        
+        # 2. Transformación de Potencia (Gaussianización)
         # Brownlee (Cap. 20): Estabiliza varianza y hace distribuciones más normales.
         # 'yeo-johnson' busca automáticamente el mejor Lambda. standardize=False para usar RobustScaler.
         ('power', PowerTransformer(method='yeo-johnson', standardize=False)),
-        
-        # 2. Escalar: Ayuda a la convergencia y visualización.
-        ('scaler', RobustScaler()),
         
         # --- NUEVO: Filtro de Correlación (Reducción de Redundancia) ---
         ('corr_filter', DropHighCorrelationFeatures(threshold=0.95, feature_names=FEATURE_NAMES)),
@@ -866,31 +867,33 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
         ))
     ])
 
-    # 2. Definir el GRID (Aquí están los controles anti-sobreajuste)
-    param_grid_BRF = {
+    # 2. Definir la DISTRIBUCIÓN (Búsqueda aleatoria en rangos)
+    param_dist_BRF = {
         # --- Balanced Random Forest (Anti-Overfitting) ---
-        "model__n_estimators": [200,300, 500],      # Bastantes árboles para estabilidad
-        "model__max_depth": [6, 8, 10],          # <--- ESTO evita el sobreajuste (profundidad baja)
-        "model__min_samples_leaf": [5, 10, 15],     # <--- ESTO obliga a generalizar (grupos grandes)
+        "model__n_estimators": randint(200, 600),   # Rango entre 200 y 600 árboles
+        "model__max_depth": randint(5, 15),         # Profundidad entre 5 y 15
+        "model__min_samples_leaf": randint(5, 20),  # Hojas mínimas entre 5 y 20
         "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
         # --- Parámetros del Selector (Dinámico) ---
-        'selector__n_features_to_select': [10,15]
+        'selector__n_features_to_select': randint(10, 25) # Seleccionar entre 10 y 25 features
     }
     
-    total_combinaciones = np.prod([len(v) for v in param_grid_BRF.values()])
-    print(f"GridSearchCV probará {total_combinaciones} combinaciones.")
+    n_iter_search = 120
+    print(f"RandomizedSearchCV probará {n_iter_search} combinaciones aleatorias.")
     print("Entrenando... (Esto puede tardar)")
 
-    # 3. Ejecutar GridSearch
-    search_cv = GridSearchCV(
+    # 3. Ejecutar RandomizedSearchCV
+    search_cv = RandomizedSearchCV(
         estimator=pipeline_BRF,
-        param_grid=param_grid_BRF,
+        param_distributions=param_dist_BRF,
+        n_iter=n_iter_search,
         cv=skf,
         scoring=f2_scorer,
         n_jobs=-1,
         verbose=2,
-        refit=True
+        refit=True,
+        random_state=random_state
     )
 
     search_cv.fit(X_train, y_train)

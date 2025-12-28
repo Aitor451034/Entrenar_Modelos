@@ -35,7 +35,7 @@ from scipy.signal import savgol_filter #Filtro de Savgol
 from scipy.interpolate import PchipInterpolator # Para suavizar curvas
 
 # --- Componentes de Scikit-learn ---
-from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict, RandomizedSearchCV
+from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split, cross_val_predict, RandomizedSearchCV, RepeatedStratifiedKFold
 from sklearn.preprocessing import StandardScaler, RobustScaler, PowerTransformer
 from imblearn.ensemble import BalancedRandomForestClassifier
 from sklearn.metrics import (
@@ -50,6 +50,7 @@ from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en
 from sklearn.ensemble import RandomForestClassifier, IsolationForest # Para detección de outliers
 from sklearn.decomposition import PCA # Para visualización 2D
 from sklearn.base import BaseEstimator, TransformerMixin # Para crear el filtro de correlación
+from sklearn.base import clone # Para clonar modelos en validación manual
 from sklearn.impute import SimpleImputer # Para imputación temporal en visualización
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
@@ -70,10 +71,11 @@ FEATURE_NAMES = [
     "num_picos", "num_valles", "q", "m_min_cuadrados"
 ]
 
-TEST_SIZE_RATIO = 0.4
+TEST_SIZE_RATIO = 0.30
 RANDOM_STATE_SEED = 42
-N_SPLITS_CV = 5
-FBETA_BETA = 2
+N_SPLITS_CV = 4
+N_REPEATS_CV = 4
+FBETA_BETA = 3
 # Precisión mínima cambiada por el usuario
 PRECISION_MINIMA = 0.77
 
@@ -825,13 +827,13 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
     
     return X_train, X_test, y_train, y_test
 
-def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
+def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_state):
     """
     *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF) ***
     """
     print("Iniciando búsqueda de hiperparámetros para Balanced RandomForest...")
     
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    skf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
     f2_scorer = make_scorer(fbeta_score, beta=fbeta)
 
     # 1. Definir el Pipeline
@@ -855,14 +857,14 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
             # RFE (Recursive Feature Elimination) elimina recursivamente las características
             # menos importantes. Aquí configuramos step=0.1 para eliminar el 10% en cada iteración,
             # lo cual es más rápido que eliminar una por una.
-            estimator=RandomForestClassifier(n_estimators=400, random_state=random_state, n_jobs=-1),
-            step=0.1 # Elimina el 10% de features en cada paso
+            estimator=RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=1),
+            step=1 # Elimina el 10% de features en cada paso
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,
             sampling_strategy="auto",
             replacement=False,
-            n_jobs=-1
+            n_jobs=1
             # NOTA: Aquí no ponemos max_depth, porque eso lo decide el Grid abajo
         ))
     ])
@@ -870,16 +872,16 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits, fbeta, random_state):
     # 2. Definir la DISTRIBUCIÓN (Búsqueda aleatoria en rangos)
     param_dist_BRF = {
         # --- Balanced Random Forest (Anti-Overfitting) ---
-        "model__n_estimators": randint(200, 600),   # Rango entre 200 y 600 árboles
-        "model__max_depth": randint(5, 15),         # Profundidad entre 5 y 15
-        "model__min_samples_leaf": randint(5, 20),  # Hojas mínimas entre 5 y 20
+        "model__n_estimators": randint(200, 500),   # Rango entre 200 y 600 árboles
+        "model__max_depth": randint(5, 12),         # Profundidad entre 5 y 12
+        "model__min_samples_leaf": randint(5, 18),  # Hojas mínimas entre 5 y 20
         "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
         # --- Parámetros del Selector (Dinámico) ---
-        'selector__n_features_to_select': randint(10, 25) # Seleccionar entre 10 y 25 features
+        'selector__n_features_to_select': randint(10, 23) # Seleccionar entre 10 y 25 features
     }
     
-    n_iter_search = 120
+    n_iter_search = 250
     print(f"RandomizedSearchCV probará {n_iter_search} combinaciones aleatorias.")
     print("Entrenando... (Esto puede tardar)")
 
@@ -970,23 +972,41 @@ def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, fe
     titulo = "Matriz de Confusión - SMOTE + RF (Umbral = 0.5)"
     _plot_confusion_matrix(matriz_confusion, titulo)
 
-def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits, precision_minima, random_state):
+def paso_5_optimizar_umbral(mejor_modelo, X_train, y_train, n_splits,n_repeats, precision_minima, random_state):
     """
     Busca el umbral de decisión óptimo usando predicciones "Out-of-Fold" (OOF)
     Y ADEMÁS, grafica la relación entre el umbral, la precisión y el recall.
     """
     print(f"\nOptimizando umbral para: MAX(Recall) sujeto a Precision >= {precision_minima}...")
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    
+    # Usamos RepeatedStratifiedKFold para mantener consistencia con el entrenamiento (Paso 3)
+    skf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=random_state)
 
-    print("Obteniendo predicciones de validación cruzada (OOF)...")
-    y_probas_cv = cross_val_predict(
-        mejor_modelo,
-        X_train,
-        y_train,
-        cv=skf,
-        method='predict_proba',
-        n_jobs=-1
-    )[:, 1]
+    print(f"Obteniendo predicciones OOF promediadas ({n_repeats} repeticiones)...")
+    
+    # Inicializar acumuladores para promediar las probabilidades de las repeticiones
+    n_samples = len(y_train)
+    y_probas_accum = np.zeros(n_samples)
+    n_counts = np.zeros(n_samples)
+    
+    # Bucle manual para Repeated CV (cross_val_predict no soporta repeticiones nativamente)
+    for i, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train)):
+        # Clonar el pipeline para tener un modelo fresco en cada fold
+        modelo_iter = clone(mejor_modelo)
+        
+        # Entrenar y predecir
+        modelo_iter.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
+        probas_fold = modelo_iter.predict_proba(X_train.iloc[val_idx])[:, 1]
+        
+        # Acumular resultados
+        y_probas_accum[val_idx] += probas_fold
+        n_counts[val_idx] += 1
+        
+        if (i + 1) % n_splits == 0:
+            print(f"   -> Completada repetición {(i + 1) // n_splits}/{n_repeats}")
+
+    # Calcular el promedio de probabilidades por muestra
+    y_probas_cv = y_probas_accum / n_counts
 
     # Listas para almacenar los valores para la gráfica
     lista_umbrales = np.linspace(0.01, 0.99, 1000)
@@ -1198,7 +1218,7 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric):
     modelo : Pipeline entrenado
     X : DataFrame de características (usamos training set)
     y : Series de etiquetas (usamos training set)
-    cv : Objeto StratifiedKFold para validación cruzada
+    cv : Objeto RepeatStratifiedKFold para validación cruzada
     scoring_metric : Métrica a evaluar (F2 Score, etc.)
     """
     print("\nGenerando Curvas de Aprendizaje...")
@@ -1326,8 +1346,8 @@ def main():
 
     # PASO 3: Entrenar el pipeline SMOTE + RandomForest
     mejor_modelo = paso_3_entrenar_modelo(
-        X_train, y_train, 
-        N_SPLITS_CV, FBETA_BETA, RANDOM_STATE_SEED
+        X_train, y_train,
+        N_SPLITS_CV, N_REPEATS_CV, FBETA_BETA, RANDOM_STATE_SEED
     )
 
     # PASO 4: Evaluación inicial (Importancia, CM con umbral 0.5)
@@ -1337,8 +1357,8 @@ def main():
 
     # PASO 5: Optimizar el umbral de decisión (con PRECISION_MINIMA)
     optimal_threshold = paso_5_optimizar_umbral(
-        mejor_modelo, X_train, y_train, 
-        N_SPLITS_CV, PRECISION_MINIMA, RANDOM_STATE_SEED
+        mejor_modelo, X_train, y_train,
+        N_SPLITS_CV, N_REPEATS_CV, PRECISION_MINIMA, RANDOM_STATE_SEED
     )
 
     # PASO 6: Evaluación final (Reporte, CM, ROC, Errores) y Guardado
@@ -1375,7 +1395,7 @@ def main():
     
     # Preparar los objetos necesarios para la gráfica
     # CV: Usar la misma validación cruzada que en el Paso 3 (5 folds estratificados)
-    cv_plot = StratifiedKFold(n_splits=N_SPLITS_CV, shuffle=True, random_state=RANDOM_STATE_SEED)
+    cv_plot = RepeatedStratifiedKFold(n_splits=N_SPLITS_CV, n_repeats=N_REPEATS_CV, random_state=RANDOM_STATE_SEED)
     
     # Scorer: Usar la misma métrica de optimización (F2-score)
     # Esto asegura que la gráfica mida lo mismo que el modelo fue entrenado

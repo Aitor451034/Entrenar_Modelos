@@ -71,13 +71,13 @@ FEATURE_NAMES = [
     "num_picos", "num_valles", "q", "m_min_cuadrados"
 ]
 
-TEST_SIZE_RATIO = 0.30
+TEST_SIZE_RATIO = 0.3
 RANDOM_STATE_SEED = 42
-N_SPLITS_CV = 4
-N_REPEATS_CV = 4
-FBETA_BETA = 3
+N_SPLITS_CV = 5
+N_REPEATS_CV = 3
+FBETA_BETA = 4
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.77
+PRECISION_MINIMA = 0.7
 
 
 # ==============================================================================
@@ -878,7 +878,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
         "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
         # --- Parámetros del Selector (Dinámico) ---
-        'selector__n_features_to_select': randint(10, 23) # Seleccionar entre 10 y 25 features
+        'selector__n_features_to_select': randint(5,15) # Seleccionar entre 10 y 25 features
     }
     
     n_iter_search = 250

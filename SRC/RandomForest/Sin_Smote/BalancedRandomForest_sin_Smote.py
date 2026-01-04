@@ -77,7 +77,7 @@ N_SPLITS_CV = 5
 N_REPEATS_CV = 3
 FBETA_BETA = 4
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.7
+PRECISION_MINIMA = 0.70
 
 
 # ==============================================================================

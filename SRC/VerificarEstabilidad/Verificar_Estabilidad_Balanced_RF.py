@@ -60,7 +60,7 @@ MEJORES_PARAMETROS_GRID = {
 
 # --- Configuración del Bucle ---
 N_ITERACIONES_ESTABILIDAD = 50  # Número de repeticiones (seeds distintas)
-TEST_SIZE_RATIO = 0.4           # Debe coincidir con tu entrenamiento
+TEST_SIZE_RATIO = 0.3           # Debe coincidir con tu entrenamiento
 METRICA_FOCO = 'Recall'         # 'Recall' o 'Precision'
 
 # --- Umbral ---

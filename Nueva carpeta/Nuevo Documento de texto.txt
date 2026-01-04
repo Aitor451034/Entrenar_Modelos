@@ -1,0 +1,102 @@
+Mejores parámetros: {'model__class_weight': 'balanced_subsample', 'model__max_depth': 8, 'model__max_features': 'log2', 'model__min_samples_leaf': 17, 'model__n_estimators': 221, 'selector__n_features_to_select': 9}
+Mejor score F2 (en CV): 0.8608
+
+[REPORTE FINAL] Características eliminadas por Alta Correlación (> 0.95):
+  -> Eliminada 'rms' (Corr 0.9776 con 'resistencia_ultima')
+  -> Eliminada 'r_mean_post_max' (Corr 0.9914 con 'resistencia_ultima')
+  -> Eliminada 'r_mean' (Corr 0.9806 con 'resistencia_ultima')
+  -> Eliminada 'pendientes_negativas_post' (Corr 0.9867 con 'rango_t_e_beta')
+  -> Eliminada 'area_pre_mitad' (Corr 0.9965 con 'area_bajo_curva')
+  -> Eliminada 'area_post_mitad' (Corr 0.9958 con 'area_bajo_curva')
+  -> Eliminada 'max_jerk' (Corr 0.9715 con 'max_curvatura')
+  -> Eliminada 'mediana' (Corr 0.9731 con 'resistencia_ultima')
+  -> Eliminada 'varianza' (Corr 0.9910 con 'desv')
+
+Importancia de las 9 características seleccionadas:
+               predictor  importancia
+3     resistencia_ultima     0.218572
+5            pendiente_V     0.192968
+7                      q     0.130684
+6        area_bajo_curva     0.108013
+4                   desv     0.087509
+0    resistencia_inicial     0.084304
+2       desv_pre_mitad_t     0.080844
+1  rango_intercuartilico     0.057045
+8        m_min_cuadrados     0.040060
+
+
+
+
+Optimizando umbral para: MAX(Recall) sujeto a Precision >= 0.7...
+Obteniendo predicciones OOF promediadas (3 repeticiones)...
+   -> Completada repetición 1/3
+   -> Completada repetición 2/3
+   -> Completada repetición 3/3
+Calculando métricas para cada umbral...
+¡Éxito! Se encontró un umbral que cumple los requisitos.
+   -> Umbral óptimo: 0.3818
+   -> Recall resultante (en CV): 0.9101
+   -> Precision resultante (en CV): 0.7043
+Generando gráfico Precision-Recall vs. Umbral...
+
+--- Evaluación Final en Conjunto de Prueba (Test Set) ---
+
+Reporte de Clasificación (Test Set):
+                         precision    recall  f1-score   support
+
+         0: Sin Defecto       0.95      0.79      0.86        48
+1: Con Defecto (Pegado)       0.78      0.95      0.86        38
+
+               accuracy                           0.86        86
+              macro avg       0.87      0.87      0.86        86
+           weighted avg       0.88      0.86      0.86        86
+
+
+--- INICIANDO ANÁLISIS DE ERRORES EN EL TEST SET ---
+
+[INFORME] Se han encontrado 2 Falsos Negativos (Defectos NO detectados):
+     Etiqueta_Defecto  Prediccion_Binaria  Probabilidad_Defecto
+160                 1                   0              0.181979
+124                 1                   0              0.367181
+
+[INFORME] Se han encontrado 10 Falsos Positivos (Falsas Alarmas):
+     Etiqueta_Defecto  Prediccion_Binaria  Probabilidad_Defecto
+158                 0                   1              0.542718
+34                  0                   1              0.774233
+115                 0                   1              0.607567
+285                 0                   1              0.684894
+244                 0                   1              0.462924
+283                 0                   1              0.563668
+265                 0                   1              0.736361
+114                 0                   1              0.666852
+261                 0                   1              0.396969
+255                 0                   1              0.399129
+
+======================================================================
+PASO 7 (BONUS): ANALIZANDO SESGO-VARIANZA (CURVA DE APRENDIZAJE)
+======================================================================
+Este gráfico muestra cómo mejora el modelo conforme aumentan los datos
+
+Generando Curvas de Aprendizaje...
+Gap final entre Train y Validación: 0.0495
+Sesgo (aprox): 0.1614
+Varianza (aprox): 0.0495
+✓ Gap pequeño: El modelo tiene buen balance (sin overfitting notable)
+
+
+
+======================================================================
+ESTABILIDAD DEL MODELO CON 86 MUESTRAS 50 ITERACIONES DE RANDOMSEED
+======================================================================
+========================================
+ RESULTADOS ESTADÍSTICOS FINALES
+========================================
+RECALL    -> Media: 0.9221 | Std: 0.0476 | Min: 0.7895 | Max: 1.0000
+PRECISION -> Media: 0.6813 | Std: 0.0402 | Min: 0.6071 | Max: 0.7826
+
+--- VEREDICTO ---
+
+✅ [ ESTABLE ]
+La desviación es excelente (0.0476 <= 0.05).
+El modelo es robusto y fiable para producción.
+

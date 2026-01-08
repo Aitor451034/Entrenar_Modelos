@@ -1181,7 +1181,7 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     }
     
     # Ajusta el nombre del archivo según el modelo que estés usando (RF o CatBoost)
-    nombre_archivo = 'modelo_con_umbral_PEGADOS_PipelineCompleto.pkl'
+    nombre_archivo = 'modelo_con_umbral_PEGADOS_BRF.pkl'
     
     with open(nombre_archivo, 'wb') as f:
         pickle.dump(artefactos_modelo, f)

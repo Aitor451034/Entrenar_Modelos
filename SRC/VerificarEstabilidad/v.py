@@ -73,7 +73,7 @@ METRICA_FOCO = 'Recall'         # 'Recall' o 'Precision'
 
 # --- Umbrales ---
 UMBRAL_DESVIACION_ESTABLE = 0.05 
-UMBRAL_PERSONALIZADO = 0.3818  # El umbral óptimo que obtuviste en el Paso 5
+UMBRAL_PERSONALIZADO = 0.4024  # El umbral óptimo que obtuviste en el Paso 5
 
 # Ruta por defecto (opcional, si falla pedirá archivo manual)
 RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Datos_Titanio25-26.csv"

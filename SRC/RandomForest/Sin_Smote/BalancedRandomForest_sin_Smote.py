@@ -27,6 +27,7 @@ import seaborn as sns
 import pickle
 import tkinter as tk
 from tkinter import filedialog
+import joblib
 
 # --- Funciones científicas y estadísticas ---
 from scipy.signal import find_peaks
@@ -1178,19 +1179,16 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     print(falsos_positivos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
 
     # --- 5. Guardar Artefactos del Modelo ---
-    print("\nGuardando pipeline COMPLETO (Scaler+Selector+Modelo) y umbral...")
+    print("\nGuardando pipeline COMPLETO...")
     
     artefactos_modelo = {
         "pipeline_completo": mejor_modelo, # ¡Aquí va todo junto!
         "umbral": optimal_threshold,
-        "feature_names_originales": feature_names # Guardamos los nombres para referencia futura
+        "feature_names_originales": FEATURE_NAMES # Guardamos los nombres para referencia futura
     }
     
-    # Ajusta el nombre del archivo según el modelo que estés usando (RF o CatBoost)
-    nombre_archivo = 'modelo_con_umbral_PEGADOS_PipelineCompleto.pkl'
-    
-    with open(nombre_archivo, 'wb') as f:
-        pickle.dump(artefactos_modelo, f)
+    # Guardar en disco
+    joblib.dump(artefactos_modelo, "modelo_pegados_production_v1.pkl")
 
     print(f"¡Proceso completado! Modelo guardado con umbral = {optimal_threshold:.4f}")
 

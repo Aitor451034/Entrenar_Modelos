@@ -52,6 +52,9 @@ from sklearn.decomposition import PCA # Para visualización 2D
 from sklearn.base import BaseEstimator, TransformerMixin # Para crear el filtro de correlación
 from sklearn.base import clone # Para clonar modelos en validación manual
 from sklearn.impute import SimpleImputer # Para imputación temporal en visualización
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.ensemble import ExtraTreesRegressor
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -829,7 +832,7 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF) ***
+    *** LÓGICA CENTRAL: Pipeline Completo (Imputador + Scaler + Distribución mas Gaussiana + Selector + Balanced RF) ***
     """
     print("Iniciando búsqueda de hiperparámetros para Balanced RandomForest...")
     
@@ -841,6 +844,16 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     # lo instanciamos directamente dentro del pipeline para evitar confusiones.
     
     pipeline_BRF = ImbPipeline([
+        
+        # 0. IMPUTACIÓN (El primer paso obligatorio)
+        # Rellena los huecos usando la física aprendida de las otras variables.
+        # Usamos ExtraTreesRegressor porque es rápido y robusto.
+        ('imputer', IterativeImputer(
+            estimator=ExtraTreesRegressor(n_jobs=1, random_state=random_state),
+            initial_strategy='median', # Relleno inicial seguro antes de iterar
+            max_iter=10,
+            random_state=random_state
+        )),
         
         # 1. Escalar: Ayuda a la convergencia y visualización.
         ('scaler', RobustScaler()),

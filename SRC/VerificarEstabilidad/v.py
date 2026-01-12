@@ -57,13 +57,13 @@ warnings.filterwarnings(action='ignore', category=FutureWarning)
 MEJORES_PARAMETROS_GRID = {
     # Parámetros del Modelo (BalancedRandomForest)
     'model__class_weight': 'balanced_subsample',
-    'model__max_depth': 8,              # Ajusta según tus resultados
-    'model__max_features': 'log2',
-    'model__min_samples_leaf': 17,
-    'model__n_estimators': 221,
+    'model__max_depth': 11,              # Ajusta según tus resultados
+    'model__max_features': 'sqrt',
+    'model__min_samples_leaf': 15,
+    'model__n_estimators': 228,
     
     # Parámetros del Selector (RFE)
-    'selector__n_features_to_select': 9
+    'selector__n_features_to_select': 8
 }
 
 # --- Configuración del Bucle ---
@@ -73,7 +73,7 @@ METRICA_FOCO = 'Recall'         # 'Recall' o 'Precision'
 
 # --- Umbrales ---
 UMBRAL_DESVIACION_ESTABLE = 0.05 
-UMBRAL_PERSONALIZADO = 0.4024  # El umbral óptimo que obtuviste en el Paso 5
+UMBRAL_PERSONALIZADO = 0.3671 # El umbral óptimo que obtuviste en el Paso 5
 
 # Ruta por defecto (opcional, si falla pedirá archivo manual)
 RUTA_CSV_POR_DEFECTO = r"C:\Users\U5014554\Desktop\EntrenarModelo\DATA\Datos_Titanio25-26.csv"

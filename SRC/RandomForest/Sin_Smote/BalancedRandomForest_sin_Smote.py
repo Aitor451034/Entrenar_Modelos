@@ -75,13 +75,13 @@ FEATURE_NAMES = [
     "num_picos", "num_valles", "q", "m_min_cuadrados"
 ]
 
-TEST_SIZE_RATIO = 0.3
+TEST_SIZE_RATIO = 0.25
 RANDOM_STATE_SEED = 42
 N_SPLITS_CV = 5
-N_REPEATS_CV = 3
-FBETA_BETA = 4
+N_REPEATS_CV = 5
+FBETA_BETA = 3
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.70
+PRECISION_MINIMA = 0.7
 
 
 # ==============================================================================
@@ -895,7 +895,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
         'selector__n_features_to_select': randint(5,15) # Seleccionar entre 10 y 25 features
     }
     
-    n_iter_search = 250
+    n_iter_search = 100
     print(f"RandomizedSearchCV probará {n_iter_search} combinaciones aleatorias.")
     print("Entrenando... (Esto puede tardar)")
 

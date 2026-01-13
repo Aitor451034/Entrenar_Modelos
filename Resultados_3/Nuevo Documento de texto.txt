@@ -1,0 +1,105 @@
+Entrenamiento completado.
+Mejores parámetros: {'model__class_weight': 'balanced', 'model__max_depth': 11, 'model__max_features': 'sqrt', 'model__min_samples_leaf': 15, 'model__n_estimators': 228, 'selector__n_features_to_select': 8}
+Mejor score F2 (en CV): 0.8565
+
+[REPORTE FINAL] Características eliminadas por Alta Correlación (> 0.95):
+  -> Eliminada 'rms' (Corr 0.9776 con 'resistencia_ultima')
+  -> Eliminada 'r_mean_post_max' (Corr 0.9914 con 'resistencia_ultima')
+  -> Eliminada 'r_mean' (Corr 0.9806 con 'resistencia_ultima')
+  -> Eliminada 'pendientes_negativas_post' (Corr 0.9867 con 'rango_t_e_beta')
+  -> Eliminada 'area_pre_mitad' (Corr 0.9965 con 'area_bajo_curva')
+  -> Eliminada 'area_post_mitad' (Corr 0.9958 con 'area_bajo_curva')
+  -> Eliminada 'max_jerk' (Corr 0.9715 con 'max_curvatura')
+  -> Eliminada 'mediana' (Corr 0.9731 con 'resistencia_ultima')
+  -> Eliminada 'varianza' (Corr 0.9910 con 'desv')
+
+Importancia de las 8 características seleccionadas:
+               predictor  importancia
+5            pendiente_V     0.179890
+3     resistencia_ultima     0.175392
+7                      q     0.162699
+6        area_bajo_curva     0.138669
+0    resistencia_inicial     0.095493
+1  rango_intercuartilico     0.085476
+4                   desv     0.084503
+2       desv_pre_mitad_t     0.077879
+
+Optimizando umbral para: MAX(Recall) sujeto a Precision >= 0.7...
+Obteniendo predicciones OOF promediadas (5 repeticiones)...
+   -> Completada repetición 1/5
+   -> Completada repetición 2/5
+   -> Completada repetición 3/5
+   -> Completada repetición 4/5
+   -> Completada repetición 5/5
+Calculando métricas para cada umbral...
+¡Éxito! Se encontró un umbral que cumple los requisitos.
+   -> Umbral óptimo: 0.3671
+   -> Recall resultante (en CV): 0.9101
+   -> Precision resultante (en CV): 0.7043
+Generando gráfico Precision-Recall vs. Umbral...
+
+--- Evaluación Final en Conjunto de Prueba (Test Set) ---
+
+Reporte de Clasificación (Test Set):
+                         precision    recall  f1-score   support
+
+         0: Sin Defecto       0.88      0.75      0.81        48
+1: Con Defecto (Pegado)       0.73      0.87      0.80        38
+
+               accuracy                           0.80        86
+              macro avg       0.81      0.81      0.80        86
+           weighted avg       0.81      0.80      0.80        86
+
+
+--- INICIANDO ANÁLISIS DE ERRORES EN EL TEST SET ---
+
+[INFORME] Se han encontrado 5 Falsos Negativos (Defectos NO detectados):
+     Etiqueta_Defecto  Prediccion_Binaria  Probabilidad_Defecto
+193                 1                   0              0.358816
+217                 1                   0              0.350664
+160                 1                   0              0.185925
+216                 1                   0              0.331873
+207                 1                   0              0.339109
+
+[INFORME] Se han encontrado 12 Falsos Positivos (Falsas Alarmas):
+     Etiqueta_Defecto  Prediccion_Binaria  Probabilidad_Defecto
+158                 0                   1              0.479941
+34                  0                   1              0.758119
+115                 0                   1              0.684900
+285                 0                   1              0.688350
+244                 0                   1              0.417742
+75                  0                   1              0.394303
+283                 0                   1              0.488277
+265                 0                   1              0.708965
+114                 0                   1              0.742215
+129                 0                   1              0.442494
+33                  0                   1              0.373011
+255                 0                   1              0.394058
+
+Guardando pipeline COMPLETO...
+¡Proceso completado! Modelo guardado con umbral = 0.3671
+
+======================================================================
+PASO 7 (BONUS): ANALIZANDO SESGO-VARIANZA (CURVA DE APRENDIZAJE)
+======================================================================
+Este gráfico muestra cómo mejora el modelo conforme aumentan los datos
+
+Generando Curvas de Aprendizaje...
+Gap final entre Train y Validación: 0.0398
+Sesgo (aprox): 0.1522
+Varianza (aprox): 0.0398
+✓ Gap pequeño: El modelo tiene buen balance (sin overfitting notable)
+
+
+========================================
+ RESULTADOS ESTADÍSTICOS FINALES
+========================================
+RECALL    -> Media: 0.9295 | Std: 0.0419 | Min: 0.7895 | Max: 1.0000
+PRECISION -> Media: 0.6767 | Std: 0.0389 | Min: 0.6140 | Max: 0.7872
+
+--- VEREDICTO ---
+
+✅ [ ESTABLE ]
+La desviación es excelente (0.0419 <= 0.05).
+El modelo es robusto y fiable para producción.
+

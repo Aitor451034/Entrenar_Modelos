@@ -53,9 +53,7 @@ from sklearn.decomposition import PCA # Para visualización 2D
 from sklearn.base import BaseEstimator, TransformerMixin # Para crear el filtro de correlación
 from sklearn.base import clone # Para clonar modelos en validación manual
 from sklearn.impute import SimpleImputer # Para imputación temporal en visualización
-from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import IterativeImputer
-from sklearn.ensemble import ExtraTreesRegressor
+
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -847,14 +845,9 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     pipeline_BRF = ImbPipeline([
         
         # 0. IMPUTACIÓN (El primer paso obligatorio)
-        # Rellena los huecos usando la física aprendida de las otras variables.
-        # Usamos ExtraTreesRegressor porque es rápido y robusto.
-        ('imputer', IterativeImputer(
-            estimator=ExtraTreesRegressor(n_jobs=1, random_state=random_state),
-            initial_strategy='median', # Relleno inicial seguro antes de iterar
-            max_iter=10,
-            random_state=random_state
-        )),
+        # Usamos 'median' porque no se ve afectada por los valores extremos
+        # que mencionas que son válidos.
+        ('imputer', SimpleImputer(strategy='median')),
         
         # 1. Escalar: Ayuda a la convergencia y visualización.
         ('scaler', RobustScaler()),

@@ -890,6 +890,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     
     n_iter_search = 100
     print(f"RandomizedSearchCV probará {n_iter_search} combinaciones aleatorias.")
+
     print("Entrenando... (Esto puede tardar)")
 
     # 3. Ejecutar RandomizedSearchCV
@@ -913,6 +914,47 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     print(f"Mejor score F2 (en CV): {search_cv.best_score_:.4f}")
     
     return mejor_modelo
+
+def detectar_errores_etiquetado(modelo, X, y, threshold=0.8):
+    """
+    Identifica registros donde existe una fuerte contradicción entre 
+    la etiqueta manual y la probabilidad del modelo.
+    """
+    print("\n" + "="*70)
+    print("ANALIZANDO POSIBLES ERRORES DE ETIQUETADO MANUAL")
+    print("="*70)
+    
+    # Obtener probabilidades usando validación cruzada para no "hacer trampa"
+    # (Predecir cada punto usando un modelo que no vio ese punto en el entrenamiento)
+    from sklearn.model_selection import cross_val_predict
+    probas = cross_val_predict(modelo, X, y, cv=5, method='predict_proba')[:, 1]
+    
+    analisis_ruido = pd.DataFrame({
+        'ID_Fila': X.index,
+        'Etiqueta_Manual': y.values,
+        'Probabilidad_Modelo': probas
+    })
+
+    # Caso A: Etiquetado como OK (0) pero el modelo está casi seguro de que es DEFECTO (1)
+    sospecha_falso_ok = analisis_ruido[(analisis_ruido['Etiqueta_Manual'] == 0) & 
+                                       (analisis_ruido['Probabilidad_Modelo'] > threshold)]
+    
+    # Caso B: Etiquetado como DEFECTO (1) pero el modelo está casi seguro de que es OK (0)
+    sospecha_falso_defecto = analisis_ruido[(analisis_ruido['Etiqueta_Manual'] == 1) & 
+                                            (analisis_ruido['Probabilidad_Modelo'] < (1 - threshold))]
+
+    print(f"-> Sospechas de puntos OK mal etiquetados: {len(sospecha_falso_ok)}")
+    print(f"-> Sospechas de DEFECTOS mal etiquetados: {len(sospecha_falso_defecto)}")
+    
+    if not sospecha_falso_ok.empty:
+        print("\nRevisar estos puntos (Etiqueta 0, pero parecen 1):")
+        print(sospecha_falso_ok.to_string())
+        
+    if not sospecha_falso_defecto.empty:
+        print("\nRevisar estos puntos (Etiqueta 1, pero parecen 0):")
+        print(sospecha_falso_defecto.to_string())
+
+    return pd.concat([sospecha_falso_ok, sospecha_falso_defecto])
 
 def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, feature_names):
     """
@@ -1320,6 +1362,7 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric):
         print("✗ Gap grande: Overfitting significativo, considera regularización")
 
 
+
 # ==============================================================================
 # 5. PUNTO DE ENTRADA PRINCIPAL
 # ==============================================================================
@@ -1353,6 +1396,9 @@ def main():
         X_train, y_train,
         N_SPLITS_CV, N_REPEATS_CV, FBETA_BETA, RANDOM_STATE_SEED
     )
+
+    #Paso detectar_errores_etiquetado
+    errores = detectar_errores_etiquetado(mejor_modelo, X_train, y_train)
 
     # PASO 4: Evaluación inicial (Importancia, CM con umbral 0.5)
     paso_4_evaluar_importancia_y_umbral_defecto(

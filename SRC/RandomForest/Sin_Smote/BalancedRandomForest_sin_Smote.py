@@ -865,7 +865,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
             # menos importantes. Aquí configuramos step=0.1 para eliminar el 10% en cada iteración,
             # lo cual es más rápido que eliminar una por una.
             estimator=RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=1),
-            step=1 # Elimina el 10% de features en cada paso
+            step=0.1 # Elimina el 10% de features en cada paso
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,

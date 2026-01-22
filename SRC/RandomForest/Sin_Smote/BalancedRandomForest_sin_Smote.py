@@ -75,11 +75,11 @@ FEATURE_NAMES = [
 
 TEST_SIZE_RATIO = 0.25
 RANDOM_STATE_SEED = 42
-N_SPLITS_CV = 5
+N_SPLITS_CV = 8
 N_REPEATS_CV = 5
 FBETA_BETA = 3
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.7
+PRECISION_MINIMA = 0.85
 
 
 # ==============================================================================
@@ -879,13 +879,13 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     # 2. Definir la DISTRIBUCIÓN (Búsqueda aleatoria en rangos)
     param_dist_BRF = {
         # --- Balanced Random Forest (Anti-Overfitting) ---
-        "model__n_estimators": randint(200, 500),   # Rango entre 200 y 600 árboles
-        "model__max_depth": randint(5, 12),         # Profundidad entre 5 y 12
-        "model__min_samples_leaf": randint(5, 18),  # Hojas mínimas entre 5 y 20
-        "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
+        "model__n_estimators": randint(300, 800),   # Rango entre 200 y 600 árboles
+        "model__max_depth": randint(3, 8),         # Profundidad entre 5 y 12
+        "model__min_samples_leaf": randint(10, 25),  # Hojas mínimas entre 5 y 20
+        "model__max_features": ["sqrt","log2",0.3,0.5],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
         # --- Parámetros del Selector (Dinámico) ---
-        'selector__n_features_to_select': randint(5,15) # Seleccionar entre 10 y 25 features
+        'selector__n_features_to_select': randint(5,12) # Seleccionar entre 10 y 25 features
     }
     
     n_iter_search = 100

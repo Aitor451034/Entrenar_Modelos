@@ -75,9 +75,9 @@ FEATURE_NAMES = [
 
 TEST_SIZE_RATIO = 0.25
 RANDOM_STATE_SEED = 42
-N_SPLITS_CV = 8
-N_REPEATS_CV = 5
-FBETA_BETA = 3
+N_SPLITS_CV = 10
+N_REPEATS_CV = 10
+FBETA_BETA = 2
 # Precisión mínima cambiada por el usuario
 PRECISION_MINIMA = 0.85
 
@@ -865,7 +865,7 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
             # menos importantes. Aquí configuramos step=0.1 para eliminar el 10% en cada iteración,
             # lo cual es más rápido que eliminar una por una.
             estimator=RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=1),
-            step=0.1 # Elimina el 10% de features en cada paso
+            step=1 # Elimina el 10% de features en cada paso
         )),
         ('model', BalancedRandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,
@@ -885,10 +885,10 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
         "model__max_features": ["sqrt","log2",0.3,0.5],        # <--- ESTO reduce la varianza
         "model__class_weight": ["balanced", "balanced_subsample"],
         # --- Parámetros del Selector (Dinámico) ---
-        'selector__n_features_to_select': randint(5,12) # Seleccionar entre 10 y 25 features
+        'selector__n_features_to_select': randint(5,10) # Seleccionar entre 10 y 25 features
     }
     
-    n_iter_search = 100
+    n_iter_search = 200
     print(f"RandomizedSearchCV probará {n_iter_search} combinaciones aleatorias.")
 
     print("Entrenando... (Esto puede tardar)")

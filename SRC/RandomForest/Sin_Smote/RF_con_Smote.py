@@ -27,6 +27,7 @@ import seaborn as sns
 import pickle
 import tkinter as tk
 from tkinter import filedialog
+import joblib
 
 # --- Funciones científicas y estadísticas ---
 from scipy.signal import find_peaks
@@ -45,13 +46,13 @@ from sklearn.model_selection import learning_curve
 from sklearn import metrics
 from sklearn.feature_selection import SelectFromModel
 from sklearn.feature_selection import RFE
-from imblearn.over_sampling import BorderlineSMOTE # SMOTE avanzado
 from sklearn.ensemble import RandomForestClassifier # Para usarlo como filtro en el selector
-from sklearn.ensemble import RandomForestClassifier, IsolationForest # Para detección de outliers
+from sklearn.ensemble import IsolationForest # Para detección de outliers
 from sklearn.decomposition import PCA # Para visualización 2D
 from sklearn.base import BaseEstimator, TransformerMixin # Para crear el filtro de correlación
 from sklearn.base import clone # Para clonar modelos en validación manual
 from sklearn.impute import SimpleImputer # Para imputación temporal en visualización
+
 
 # --- NUEVAS BIBLIOTECAS: Imbalanced-learn ---
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -71,13 +72,13 @@ FEATURE_NAMES = [
     "num_picos", "num_valles", "q", "m_min_cuadrados"
 ]
 
-TEST_SIZE_RATIO = 0.3
+TEST_SIZE_RATIO = 0.25
 RANDOM_STATE_SEED = 42
-N_SPLITS_CV = 5
-N_REPEATS_CV = 3
-FBETA_BETA = 4
+N_SPLITS_CV = 10
+N_REPEATS_CV = 5
+FBETA_BETA = 1
 # Precisión mínima cambiada por el usuario
-PRECISION_MINIMA = 0.75
+PRECISION_MINIMA = 0.85
 
 
 # ==============================================================================
@@ -829,7 +830,7 @@ def paso_2_escalar_y_dividir_datos(X, y, test_size, random_state):
 
 def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_state):
     """
-    *** LÓGICA CENTRAL: Pipeline Completo (Scaler + Selector + Balanced RF) ***
+    *** LÓGICA CENTRAL: Pipeline Completo (Imputador + Scaler + Distribución mas Gaussiana + Selector + Balanced RF) ***
     """
     print("Iniciando búsqueda de hiperparámetros para Balanced RandomForest...")
     
@@ -842,6 +843,11 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     
     pipeline_BRF = ImbPipeline([
         
+        # 0. IMPUTACIÓN (El primer paso obligatorio)
+        # Usamos 'median' porque no se ve afectada por los valores extremos
+        # que mencionas que son válidos.
+        ('imputer', SimpleImputer(strategy='median')),
+        
         # 1. Escalar: Ayuda a la convergencia y visualización.
         ('scaler', RobustScaler()),
         
@@ -853,22 +859,12 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
         # --- NUEVO: Filtro de Correlación (Reducción de Redundancia) ---
         ('corr_filter', DropHighCorrelationFeatures(threshold=0.95, feature_names=FEATURE_NAMES)),
         
-        # --- PASO CLAVE: GENERACIÓN DE DATOS ---
-        # BorderlineSMOTE solo crea puntos en la frontera difícil, no en medio de la nada.
-        # k_neighbors=3 es seguro para tu cantidad de datos (~90 defectos).
-        ('smote', BorderlineSMOTE(
-            random_state=random_state,
-            k_neighbors=3,        # Vecinos para interpolar
-            m_neighbors=10,       # Vecinos para decidir si es zona de peligro
-            kind='borderline-1'
-        )),
-
         ('selector', RFE( # 2. Seleccionar Features (Método Intrínseco/Supervisado)
             # RFE (Recursive Feature Elimination) elimina recursivamente las características
             # menos importantes. Aquí configuramos step=0.1 para eliminar el 10% en cada iteración,
             # lo cual es más rápido que eliminar una por una.
             estimator=RandomForestClassifier(n_estimators=300, random_state=random_state, n_jobs=1),
-            step=1 # Eliminación de features 1 a 1 en cada paso
+            step=1 # Elimina el 10% de features en cada paso
         )),
         ('model', RandomForestClassifier( # 3. Modelo Final (El esqueleto)
             random_state=random_state,
@@ -880,16 +876,21 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     # 2. Definir la DISTRIBUCIÓN (Búsqueda aleatoria en rangos)
     param_dist_BRF = {
         # --- Balanced Random Forest (Anti-Overfitting) ---
-        "model__n_estimators": randint(200, 600),   # Rango entre 200 y 600 árboles
-        "model__max_depth": randint(5, 15),         # Profundidad entre 5 y 12
-        "model__min_samples_leaf": randint(2, 14),  # Hojas mínimas entre 5 y 20
+        "model__n_estimators": randint(400, 1000),   # Rango entre 200 y 600 árboles
+        "model__max_depth": randint(5, 20),         # Profundidad entre 5 y 12
+        "model__min_samples_leaf": randint(2, 10),  # Hojas mínimas entre 5 y 20
+        "model__min_samples_split": randint(5, 20),
         "model__max_features": ["sqrt","log2"],        # <--- ESTO reduce la varianza
+        "model__class_weight": ["balanced", "balanced_subsample"],
+        # Criterio: A veces 'entropy' captura mejor la ganancia de información en datos desbalanceados.
+        "model__criterion": ["gini", "entropy"],
         # --- Parámetros del Selector (Dinámico) ---
-        'selector__n_features_to_select': randint(5,15) # Seleccionar entre 10 y 25 features
+        'selector__n_features_to_select': randint(5,12) # Seleccionar entre 10 y 25 features
     }
     
-    n_iter_search = 250
+    n_iter_search = 100
     print(f"RandomizedSearchCV probará {n_iter_search} combinaciones aleatorias.")
+
     print("Entrenando... (Esto puede tardar)")
 
     # 3. Ejecutar RandomizedSearchCV
@@ -913,6 +914,47 @@ def paso_3_entrenar_modelo(X_train, y_train, n_splits,n_repeats, fbeta, random_s
     print(f"Mejor score F2 (en CV): {search_cv.best_score_:.4f}")
     
     return mejor_modelo
+
+def detectar_errores_etiquetado(modelo, X, y, threshold=0.8):
+    """
+    Identifica registros donde existe una fuerte contradicción entre 
+    la etiqueta manual y la probabilidad del modelo.
+    """
+    print("\n" + "="*70)
+    print("ANALIZANDO POSIBLES ERRORES DE ETIQUETADO MANUAL")
+    print("="*70)
+    
+    # Obtener probabilidades usando validación cruzada para no "hacer trampa"
+    # (Predecir cada punto usando un modelo que no vio ese punto en el entrenamiento)
+    from sklearn.model_selection import cross_val_predict
+    probas = cross_val_predict(modelo, X, y, cv=5, method='predict_proba')[:, 1]
+    
+    analisis_ruido = pd.DataFrame({
+        'ID_Fila': X.index,
+        'Etiqueta_Manual': y.values,
+        'Probabilidad_Modelo': probas
+    })
+
+    # Caso A: Etiquetado como OK (0) pero el modelo está casi seguro de que es DEFECTO (1)
+    sospecha_falso_ok = analisis_ruido[(analisis_ruido['Etiqueta_Manual'] == 0) & 
+                                       (analisis_ruido['Probabilidad_Modelo'] > threshold)]
+    
+    # Caso B: Etiquetado como DEFECTO (1) pero el modelo está casi seguro de que es OK (0)
+    sospecha_falso_defecto = analisis_ruido[(analisis_ruido['Etiqueta_Manual'] == 1) & 
+                                            (analisis_ruido['Probabilidad_Modelo'] < (1 - threshold))]
+
+    print(f"-> Sospechas de puntos OK mal etiquetados: {len(sospecha_falso_ok)}")
+    print(f"-> Sospechas de DEFECTOS mal etiquetados: {len(sospecha_falso_defecto)}")
+    
+    if not sospecha_falso_ok.empty:
+        print("\nRevisar estos puntos (Etiqueta 0, pero parecen 1):")
+        print(sospecha_falso_ok.to_string())
+        
+    if not sospecha_falso_defecto.empty:
+        print("\nRevisar estos puntos (Etiqueta 1, pero parecen 0):")
+        print(sospecha_falso_defecto.to_string())
+
+    return pd.concat([sospecha_falso_ok, sospecha_falso_defecto])
 
 def paso_4_evaluar_importancia_y_umbral_defecto(mejor_modelo, X_test, y_test, feature_names):
     """
@@ -1172,19 +1214,16 @@ def paso_6_evaluacion_final_y_guardado(mejor_modelo, X_test, y_test, scaler, opt
     print(falsos_positivos[['Etiqueta_Defecto', 'Prediccion_Binaria', 'Probabilidad_Defecto']].to_string())
 
     # --- 5. Guardar Artefactos del Modelo ---
-    print("\nGuardando pipeline COMPLETO (Scaler+Selector+Modelo) y umbral...")
+    print("\nGuardando pipeline COMPLETO...")
     
     artefactos_modelo = {
         "pipeline_completo": mejor_modelo, # ¡Aquí va todo junto!
         "umbral": optimal_threshold,
-        "feature_names_originales": feature_names # Guardamos los nombres para referencia futura
+        "feature_names_originales": FEATURE_NAMES # Guardamos los nombres para referencia futura
     }
     
-    # Ajusta el nombre del archivo según el modelo que estés usando (RF o CatBoost)
-    nombre_archivo = 'modelo_con_umbral_PEGADOS_BRF.pkl'
-    
-    with open(nombre_archivo, 'wb') as f:
-        pickle.dump(artefactos_modelo, f)
+    # Guardar en disco
+    joblib.dump(artefactos_modelo, "modelo_pegados_production_v1_RF.pkl")
 
     print(f"¡Proceso completado! Modelo guardado con umbral = {optimal_threshold:.4f}")
 
@@ -1323,6 +1362,7 @@ def paso_extra_graficar_bias_varianza(modelo, X, y, cv, scoring_metric):
         print("✗ Gap grande: Overfitting significativo, considera regularización")
 
 
+
 # ==============================================================================
 # 5. PUNTO DE ENTRADA PRINCIPAL
 # ==============================================================================
@@ -1356,6 +1396,9 @@ def main():
         X_train, y_train,
         N_SPLITS_CV, N_REPEATS_CV, FBETA_BETA, RANDOM_STATE_SEED
     )
+
+    #Paso detectar_errores_etiquetado
+    errores = detectar_errores_etiquetado(mejor_modelo, X_train, y_train)
 
     # PASO 4: Evaluación inicial (Importancia, CM con umbral 0.5)
     paso_4_evaluar_importancia_y_umbral_defecto(

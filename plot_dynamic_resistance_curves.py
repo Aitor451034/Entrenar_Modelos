@@ -147,10 +147,13 @@ def extraer_curvas_resistencia(df):
         Lista de etiquetas correspondientes (0=bueno, 1=malo)
     ids : list
         Lista de IDs de punto para referencia
+    energias : list
+        Lista de energía total disipada en Joules para cada punto
     """
     curvas = []
     etiquetas = []
     ids = []
+    energias = []
     count_procesados = 0
     count_invalidos = 0
 
@@ -212,19 +215,35 @@ def extraer_curvas_resistencia(df):
             print(f"  -> ✓ CURVA VÁLIDA: Procesada correctamente")
 
             # --- CÁLCULO DE RESISTENCIA ---
-            valores_resistencia = np.divide(raw_volt, raw_corr, out=np.zeros_like(raw_volt), where=np.abs(raw_corr)>0.5)
+            valores_resistencia = np.divide(
+                raw_volt, raw_corr, out=np.zeros_like(raw_volt), where=np.abs(raw_corr) > 0.5
+            )
 
             # --- SUAVIZADO ---
-            window = min(11, len(valores_resistencia) if len(valores_resistencia)%2!=0 else len(valores_resistencia)-1)
+            window = min(11, len(valores_resistencia) if len(valores_resistencia) % 2 != 0
+                        else len(valores_resistencia) - 1)
             if window > 3:
                 r_smooth = savgol_filter(valores_resistencia, window_length=window, polyorder=3)
             else:
                 r_smooth = valores_resistencia
 
+            # --- 4. CÁLCULO DE ENERGÍA ---
+            # Se calcula la energía total disipada durante la soldadura en Joules.
+            # Fórmula: Energía (Q) = ∫ P(t) dt = ∫ V(t) * I(t) dt
+            # Se convierten las unidades a estándar (Amperios, Voltios, Segundos).
+            i_amperios = raw_corr * 10      # Corriente de kA a A.
+            v_reales = raw_volt / 100.0         # Voltaje (ajustar según la escala del sensor).
+            t_segundos = t_soldadura / 1000.0   # Tiempo de ms a s.
+
+            potencia = v_reales * i_amperios  # Potencia instantánea P(t) = V(t) * I(t).
+            # Se integra la potencia respecto al tiempo usando la regla del trapecio.
+            q_joules = np.trapz(potencia, x=t_segundos)
+
             # --- ALMACENAR RESULTADOS ---
             curvas.append((t_soldadura, r_smooth))
             etiquetas.append(int(df.loc[i, "Etiqueta datos"]))
             ids.append(int(df.loc[i, "id punto"]))
+            energias.append(q_joules)
             count_procesados += 1
 
         except Exception as e:
@@ -245,13 +264,13 @@ def extraer_curvas_resistencia(df):
             count = etiquetas.count(etiqueta)
             print(f"    -> Etiqueta {etiqueta}: {count} curvas")
 
-    return curvas, etiquetas, ids
+    return curvas, etiquetas, ids, energias
 
 # ==============================================================================
 # 3. FUNCIONES DE VISUALIZACIÓN
 # ==============================================================================
 
-def plot_curvas_resistencia(curvas, etiquetas, ids):
+def plot_curvas_resistencia(curvas, etiquetas, ids, energias):
     """
     Grafica las curvas de resistencia dinámica separadas por etiqueta.
 
@@ -266,6 +285,8 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
         Etiquetas correspondientes (0=bueno, 1=malo)
     ids : list
         IDs de los puntos para referencia
+    energias : list
+        Energía total disipada en Joules para cada punto
     """
     if not curvas:
         print("No hay curvas válidas para graficar.")
@@ -301,9 +322,9 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
         lines_buenas = []
         for i, (t, r) in enumerate(curvas_buenas):
             line, = ax1.plot(t, r, color='green', alpha=0.6, linewidth=1.5,
-                           label=f'ID{ids_buenos[i]}')
+                           label=f'ID{ids_buenos[i]} - {energias[i]:.2f}J')
             lines_buenas.append(line)
-            print(f"  -> Curva {i+1}: ID {ids_buenos[i]}")
+            print(f"  -> Curva {i+1}: ID {ids_buenos[i]} - {energias[i]:.2f}J")
 
         ax1.set_title(f'Curvas de Resistencia Dinámica - Soldaduras BUENAS (Etiqueta 0)\n'
                      f'Total: {len(curvas_buenas)} curvas', fontsize=12, fontweight='bold')
@@ -322,9 +343,9 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
         lines_malas = []
         for i, (t, r) in enumerate(curvas_malas):
             line, = ax2.plot(t, r, color='red', alpha=0.6, linewidth=1.5,
-                           label=f'ID{ids_malos[i]}')
+                           label=f'ID{ids_malos[i]} - {energias[len(curvas_buenas) + i]:.2f}J')
             lines_malas.append(line)
-            print(f"  -> Curva {i+1}: ID {ids_malos[i]}")
+            print(f"  -> Curva {i+1}: ID {ids_malos[i]} - {energias[len(curvas_buenas) + i]:.2f}J")
 
         ax2.set_title(f'Curvas de Resistencia Dinámica - Soldaduras DEFECTUOSAS (Etiqueta 1)\n'
                      f'Total: {len(curvas_malas)} curvas', fontsize=12, fontweight='bold')
@@ -353,7 +374,11 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
             # Obtener el índice de la línea seleccionada
             line_index = sel.artist.get_label()
             if line_index and line_index.startswith('ID'):
-                sel.annotation.set_text(f'ID: {line_index[2:]}')
+                # Extraer ID y energía de la etiqueta
+                parts = line_index.split(' - ')
+                id_part = parts[0]
+                energia_part = parts[1] if len(parts) > 1 else ""
+                sel.annotation.set_text(f'{id_part}\n{energia_part}')
             else:
                 # Si no tiene label, intentar encontrar el ID por posición
                 x, y = sel.target
@@ -363,7 +388,7 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
                         distances = np.sqrt((t - x)**2 + (r - y)**2)
                         min_idx = np.argmin(distances)
                         if distances[min_idx] < 0.1:  # Umbral de distancia
-                            sel.annotation.set_text(f'ID: {ids_buenos[i]}')
+                            sel.annotation.set_text(f'ID: {ids_buenos[i]}\nEnergía: {energias[i]:.2f}J')
                             break
 
         @cursor2.connect("add")
@@ -371,7 +396,11 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
             # Obtener el índice de la línea seleccionada
             line_index = sel.artist.get_label()
             if line_index and line_index.startswith('ID'):
-                sel.annotation.set_text(f'ID: {line_index[2:]}')
+                # Extraer ID y energía de la etiqueta
+                parts = line_index.split(' - ')
+                id_part = parts[0]
+                energia_part = parts[1] if len(parts) > 1 else ""
+                sel.annotation.set_text(f'{id_part}\n{energia_part}')
             else:
                 # Si no tiene label, intentar encontrar el ID por posición
                 x, y = sel.target
@@ -381,11 +410,12 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
                         distances = np.sqrt((t - x)**2 + (r - y)**2)
                         min_idx = np.argmin(distances)
                         if distances[min_idx] < 0.1:  # Umbral de distancia
-                            sel.annotation.set_text(f'ID: {ids_malos[i]}')
+                            energia_idx = len(curvas_buenas) + i
+                            sel.annotation.set_text(f'ID: {ids_malos[i]}\nEnergía: {energias[energia_idx]:.2f}J')
                             break
 
         print("\n¡Funcionalidad interactiva activada!")
-        print("Pasa el mouse sobre cualquier curva para ver su ID.")
+        print("Pasa el mouse sobre cualquier curva para ver su ID y energía.")
     else:
         print("\nPara funcionalidad interactiva, instala mplcursors:")
         print("pip install mplcursors")
@@ -407,6 +437,108 @@ def plot_curvas_resistencia(curvas, etiquetas, ids):
         duraciones_malas = [t[-1] for t, r in curvas_malas]
         print(f"Duración media malas: {np.mean(duraciones_malas):.2f} ms")
         print(f"Duración máxima malas: {np.max(duraciones_malas):.2f} ms")
+
+    # --- HISTOGRAMA DE ENERGÍAS ---
+    if curvas:
+        fig_hist, ax_hist = plt.subplots(figsize=(12, 8))
+        
+        # Histograma para soldaduras buenas
+        if curvas_buenas:
+            energias_buenas = energias[:len(curvas_buenas)]
+            ids_buenos_array = np.array(ids_buenos)
+            
+            # Crear histograma con conteo
+            counts_buenas, bins_buenas, patches_buenas = ax_hist.hist(
+                energias_buenas, bins=20, alpha=0.7, color='green', 
+                label=f'Buenas ({len(energias_buenas)} puntos)', edgecolor='black'
+            )
+            
+            # Añadir etiquetas de IDs en cada barra
+            for i, (count, patch) in enumerate(zip(counts_buenas, patches_buenas)):
+                if count > 0:
+                    # Obtener límites del bin
+                    bin_left = patch.get_x()
+                    bin_right = bin_left + patch.get_width()
+                    
+                    # Encontrar IDs que caen en este bin
+                    mask = (np.array(energias_buenas) >= bin_left) & (np.array(energias_buenas) < bin_right)
+                    ids_en_bin = ids_buenos_array[mask]
+                    
+                    if len(ids_en_bin) > 0:
+                        # Mostrar IDs en la barra
+                        y_pos = patch.get_height() + 0.5
+                        x_pos = patch.get_x() + patch.get_width() / 2
+                        ids_text = ', '.join(map(str, ids_en_bin[:3]))  # Mostrar máximo 3 IDs
+                        if len(ids_en_bin) > 3:
+                            ids_text += f'... (+{len(ids_en_bin)-3})'
+                        
+                        ax_hist.text(x_pos, y_pos, ids_text, 
+                                   ha='center', va='bottom', fontsize=8, rotation=90,
+                                   bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
+        
+        # Histograma para soldaduras malas
+        if curvas_malas:
+            energias_malas = energias[len(curvas_buenas):]
+            ids_malos_array = np.array(ids_malos)
+            
+            # Crear histograma con conteo
+            counts_malas, bins_malas, patches_malas = ax_hist.hist(
+                energias_malas, bins=20, alpha=0.7, color='red', 
+                label=f'Malas ({len(energias_malas)} puntos)', edgecolor='black'
+            )
+            
+            # Añadir etiquetas de IDs en cada barra
+            for i, (count, patch) in enumerate(zip(counts_malas, patches_malas)):
+                if count > 0:
+                    # Obtener límites del bin
+                    bin_left = patch.get_x()
+                    bin_right = bin_left + patch.get_width()
+                    
+                    # Encontrar IDs que caen en este bin
+                    mask = (np.array(energias_malas) >= bin_left) & (np.array(energias_malas) < bin_right)
+                    ids_en_bin = ids_malos_array[mask]
+                    
+                    if len(ids_en_bin) > 0:
+                        # Mostrar IDs en la barra
+                        y_pos = patch.get_height() + 0.5
+                        x_pos = patch.get_x() + patch.get_width() / 2
+                        ids_text = ', '.join(map(str, ids_en_bin[:3]))  # Mostrar máximo 3 IDs
+                        if len(ids_en_bin) > 3:
+                            ids_text += f'... (+{len(ids_en_bin)-3})'
+                        
+                        ax_hist.text(x_pos, y_pos, ids_text, 
+                                   ha='center', va='bottom', fontsize=8, rotation=90,
+                                   bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
+        
+        ax_hist.set_xlabel('Energía (Joules)', fontsize=12)
+        ax_hist.set_ylabel('Frecuencia', fontsize=12)
+        ax_hist.set_title('Distribución de Energía por Tipo de Soldadura\n(IDs de puntos en cada barra)', fontsize=14, fontweight='bold')
+        ax_hist.legend()
+        ax_hist.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+    # --- TABLA DE ENERGÍAS ---
+    if curvas:
+        print("\n=== TABLA DE ENERGÍAS POR PUNTO ===")
+        print(f"{'ID':<10} {'Etiqueta':<10} {'Energía (J)':<15}")
+        print("-" * 35)
+        
+        # Crear una lista combinada con toda la información y ordenar por energía
+        datos_ordenados = []
+        for i, ((t, r), label, id_punto) in enumerate(zip(curvas, etiquetas, ids)):
+            energia = energias[i]
+            etiqueta_str = "Buena" if label == 0 else "Mala"
+            datos_ordenados.append((id_punto, etiqueta_str, energia))
+        
+        # Ordenar por energía (índice 2) de menor a mayor
+        datos_ordenados.sort(key=lambda x: x[2])
+        
+        # Imprimir la tabla ordenada
+        for id_punto, etiqueta_str, energia in datos_ordenados:
+            print(f"{id_punto:<10} {etiqueta_str:<10} {energia:<15.2f}")
+
+
 
 # ==============================================================================
 # 4. FUNCIÓN PRINCIPAL
@@ -435,7 +567,7 @@ def main():
 
     # 3. Extraer curvas
     print("\nExtrayendo curvas de resistencia...")
-    curvas, etiquetas, ids = extraer_curvas_resistencia(df)
+    curvas, etiquetas, ids, energias = extraer_curvas_resistencia(df)
 
     if not curvas:
         print("No se pudieron extraer curvas válidas. Verifica el formato del archivo.")
@@ -443,7 +575,7 @@ def main():
 
     # 4. Visualizar
     print("\nGenerando gráficos...")
-    plot_curvas_resistencia(curvas, etiquetas, ids)
+    plot_curvas_resistencia(curvas, etiquetas, ids, energias)
 
     print("\n¡Visualización completada!")
     print("Revisa los gráficos para identificar patrones anómalos en las curvas.")

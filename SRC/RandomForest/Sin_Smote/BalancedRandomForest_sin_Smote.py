@@ -410,7 +410,7 @@ def extraer_features_fila_por_fila(new_df):
             # Se calcula la energía total disipada durante la soldadura en Joules.
             # Fórmula: Energía (Q) = ∫ P(t) dt = ∫ V(t) * I(t) dt
             # Se convierten las unidades a estándar (Amperios, Voltios, Segundos).
-            i_amperios = raw_corr * 1000.0      # Corriente de kA a A.
+            i_amperios = raw_corr * 10.0      # Corriente de kA a A.
             v_reales = raw_volt / 100.0         # Voltaje (ajustar según la escala del sensor).
             t_segundos = t_soldadura / 1000.0   # Tiempo de ms a s.
             

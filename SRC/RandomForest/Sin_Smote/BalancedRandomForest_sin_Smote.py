@@ -416,7 +416,7 @@ def extraer_features_fila_por_fila(new_df):
             
             potencia = v_reales * i_amperios # Potencia instantánea P(t) = V(t) * I(t).
             # Se integra la potencia respecto al tiempo usando la regla del trapecio.
-            q_joules = np.trapezoid(potencia, x=t_segundos)
+            q_joules = np.trapz(potencia, x=t_segundos)
 
             # --- 5. DERIVADAS Y EVENTOS FÍSICOS ---
             # Se calculan las derivadas de la curva de resistencia suavizada para analizar su dinámica.
@@ -529,10 +529,10 @@ def extraer_features_fila_por_fila(new_df):
             # --- Características basadas en Áreas ---
             # Se calcula el área bajo la curva de R(t) usando la regla del trapecio.
             # Característica 19: Área total bajo la curva R(t).
-            area_total = np.trapezoid(r_smooth, t_soldadura)
+            area_total = np.trapz(r_smooth, t_soldadura)
             idx_mitad = len(t_soldadura) // 2
             # Característica 20: Área en la primera mitad del tiempo.
-            area_pre_mitad = np.trapezoid(r_smooth[:idx_mitad], t_soldadura[:idx_mitad])
+            area_pre_mitad = np.trapz(r_smooth[:idx_mitad], t_soldadura[:idx_mitad])
             # Característica 21: Área en la segunda mitad del tiempo.
             area_post_mitad = area_total - area_pre_mitad
             
